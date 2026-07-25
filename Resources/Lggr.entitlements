@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  App Sandbox is deliberately DISABLED for the development build.
+
+	  The spec asks for "sandboxed where practical". For Lggr it is not practical: the core
+	  automatic-tracking feature reads the frontmost window's title through the Accessibility API
+	  (AXUIElement), and a sandboxed process is not permitted to become an accessibility client of
+	  other applications. Apple grants no entitlement that lifts this for a non-MAS app. Sandboxing
+	  the app therefore reduces it to application-name-only tracking.
+
+	  The stance taken here: ship unsandboxed, and compensate with hard privacy guarantees that are
+	  enforced in code rather than by the OS — no network entitlement is requested or used, capture
+	  is redacted at the point of capture, and every byte stays in
+	  ~/Library/Application Support/Lggr.
+
+	  To build a sandboxed variant (application-name-only tracking, no window titles, no browser
+	  domains), set com.apple.security.app-sandbox to <true/> and add
+	  com.apple.security.files.user-selected.read-write for Markdown/CSV export.
+	-->
+	<key>com.apple.security.app-sandbox</key>
+	<false/>
+
+	<!-- Lggr performs no networking whatsoever. These are listed explicitly, and false, so that the
+	     absence of network access is a reviewable property of the build rather than a claim. -->
+	<key>com.apple.security.network.client</key>
+	<false/>
+	<key>com.apple.security.network.server</key>
+	<false/>
+
+	<!-- Apple Events are NOT granted. Nothing in the app sends one, and an entitlement present "for
+	     later" is an entitlement an auditor has to take on trust. Set this to <true/> alongside the
+	     browser-domain feature, if it ever ships. -->
+	<key>com.apple.security.automation.apple-events</key>
+	<false/>
+</dict>
+</plist>

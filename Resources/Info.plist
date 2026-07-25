@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>LggrApp</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.luisdoriz.lggr</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Lggr</string>
+	<key>CFBundleDisplayName</key>
+	<string>Lggr</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Lggr. All data stays on this Mac.</string>
+
+	<!-- Lggr is a regular app: it owns a main window and a menu bar item. Closing the window leaves
+	     the menu bar timer running rather than quitting, which is the behaviour the product needs.
+	     Accessory mode (Dock icon hidden) is a user preference handled at runtime via
+	     NSApplication.setActivationPolicy, not a static Info.plist value, so that the setting can be
+	     toggled without relaunching. -->
+	<key>LSUIElement</key>
+	<false/>
+
+	<!-- No usage-description keys, deliberately.
+
+	     Lggr currently requests no permissions at all: activity capture uses NSWorkspace
+	     notifications, which need none. Shipping NSAccessibilityUsageDescription today would have the
+	     bundle advertise that the app reads window titles when no code path does, and anyone
+	     inspecting the app to decide whether to trust it would be reading a claim about a feature
+	     that does not exist.
+
+	     Restore NSAccessibilityUsageDescription with Phase 4 (see docs/_design/INTELLIGENCE.md §4),
+	     which reads titles in one function and reduces them to typed evidence without ever writing
+	     one to disk. Restore NSAppleEventsUsageDescription only if browser-domain reading ships. -->
+
+</dict>
+</plist>

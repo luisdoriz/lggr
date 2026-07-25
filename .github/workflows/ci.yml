@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Check module boundaries
+        run: ./Scripts/check-layering.sh
+
+      - name: Build
+        run: swift build
+
+      # Not `swift test`. On a machine without Xcode it exits 0 having run nothing, so the suite is
+      # always invoked through the wrapper, which fails when the test count is zero or drops.
+      - name: Test
+        run: ./Scripts/test.sh
+
+      - name: Package the app
+        run: ./Scripts/make-app.sh debug
