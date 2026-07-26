@@ -31,7 +31,11 @@ fi
 OUTPUT_FILE="$(mktemp -t lggr-test)"
 trap 'rm -f "$OUTPUT_FILE"' EXIT
 
-swift test "${SWIFT_TEST_ARGS[@]}" "$@" 2>&1 | tee "$OUTPUT_FILE"
+# `${a[@]+"${a[@]}"}` rather than `"${a[@]}"`: macOS ships bash 3.2, where expanding an *empty* array
+# under `set -u` is an unbound-variable error. The array is only empty when Xcode is installed — which
+# is never true on the machine this was written on and always true in CI, so the plain form passed
+# locally and failed on the first push.
+swift test ${SWIFT_TEST_ARGS[@]+"${SWIFT_TEST_ARGS[@]}"} "$@" 2>&1 | tee "$OUTPUT_FILE"
 SWIFT_TEST_STATUS=${PIPESTATUS[0]}
 
 if [ "$SWIFT_TEST_STATUS" -ne 0 ]; then
