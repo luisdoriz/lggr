@@ -17,9 +17,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>1.0.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
 	<key>LSMinimumSystemVersion</key>
@@ -28,6 +28,9 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>Lggr. All data stays on this Mac.</string>
+
+	<!-- Edit this file by hand rather than with `plutil -replace`: that rewrites the document and
+	     silently drops every comment below, including the two that record deliberate absences. -->
 
 	<!-- Lggr is a regular app: it owns a main window and a menu bar item. Closing the window leaves
 	     the menu bar timer running rather than quitting, which is the behaviour the product needs.
@@ -39,15 +42,16 @@
 
 	<!-- No usage-description keys, deliberately.
 
-	     Lggr currently requests no permissions at all: activity capture uses NSWorkspace
-	     notifications, which need none. Shipping NSAccessibilityUsageDescription today would have the
-	     bundle advertise that the app reads window titles when no code path does, and anyone
-	     inspecting the app to decide whether to trust it would be reading a claim about a feature
-	     that does not exist.
+	     Lggr requests no permissions except notifications, and that one carries no Info.plist string.
+	     Activity capture uses NSWorkspace notifications, which need none, and the global hot keys use
+	     RegisterEventHotKey rather than CGEventTap for the same reason.
+
+	     Shipping NSAccessibilityUsageDescription today would have the bundle advertise that the app
+	     reads window titles when no code path does, and anyone inspecting the app to decide whether to
+	     trust it would be reading a claim about a feature that does not exist.
 
 	     Restore NSAccessibilityUsageDescription with Phase 4 (see docs/_design/INTELLIGENCE.md §4),
 	     which reads titles in one function and reduces them to typed evidence without ever writing
 	     one to disk. Restore NSAppleEventsUsageDescription only if browser-domain reading ships. -->
-
 </dict>
 </plist>
