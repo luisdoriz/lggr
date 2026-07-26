@@ -16,8 +16,21 @@ import SwiftUI
 /// Nothing about the running app changes: `isGalleryMode` is `false` everywhere except inside
 /// `SnapshotMode`, so every user-facing surface gets the ordinary grouped `Form` that
 /// `04-screens.md` § 4.7 asks for. The photograph loses the grouped background and the platform
-/// insets, which is a real loss — a snapshot of this container proves the copy, the row order, the
-/// wrapping and the states, not the chrome. That is still infinitely more than grey.
+/// insets, which is a real loss — a snapshot of this container proves the copy, the row order and
+/// the states, not the chrome. That is still infinitely more than grey.
+///
+/// ### What a snapshot of this container cannot tell you
+///
+/// **Do not judge responsive behaviour from it.** A `Section` inside the plain stack does not
+/// constrain width the way it does inside a `Form`, so a narrow render of a Settings pane comes back
+/// clipped on both edges whether or not the real window has any such problem. That was measured:
+/// chasing a reported layout issue this way produced a convincingly broken 380pt image, and a
+/// standalone probe then showed the same content wrapping correctly at the same width — the two
+/// side-by-side hour pickers fit in 380pt with room to spare, and `ImageRenderer` honours the frame
+/// and wraps `Text` exactly as it should.
+///
+/// So the clipping was this container, not the app. Width-sensitive layout in Settings has to be
+/// judged from a screenshot of the running window; this type is for copy, ordering and state.
 @MainActor
 struct SettingsForm<Content: View>: View {
 
