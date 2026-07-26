@@ -1,5 +1,9 @@
 # Lggr
 
+[![CI](https://github.com/luisdoriz/lggr/actions/workflows/ci.yml/badge.svg)](https://github.com/luisdoriz/lggr/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Platform: macOS 14+](https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey.svg)
+
 A native macOS app for understanding the gap between what you meant to work on and what you actually
 did. Focus sessions with an intended outcome, ambient activity tracking that rebuilds the day you
 forgot to log, and a running record of what you actually produced.
@@ -8,16 +12,35 @@ Everything stays on your Mac. No account, no server, no network code.
 
 ## Requirements
 
-macOS 14 or newer. A Swift 6 toolchain — Xcode, or Command Line Tools on their own.
+macOS 14 or newer. To build: a Swift 6 toolchain — Xcode, or Command Line Tools on their own.
 
-## Build and run
+## Install
+
+Download `Lggr.app.zip` from the [latest release](https://github.com/luisdoriz/lggr/releases/latest),
+unzip it, and drag `Lggr.app` to `/Applications`.
+
+**The first launch needs one extra step.** The app is signed ad-hoc rather than notarized — that
+requires a paid Apple Developer account — so macOS will refuse to open it and may say it is
+*damaged*. It is not; that is what Gatekeeper says about any unnotarized download. Clear the
+quarantine flag once:
 
 ```bash
+xattr -d com.apple.quarantine /Applications/Lggr.app
+```
+
+Then open it normally. If you would rather not run a command you were told to run by a README —
+which is a reasonable instinct — build it from source instead; it takes about a minute.
+
+## Build from source
+
+```bash
+git clone https://github.com/luisdoriz/lggr.git
+cd lggr
 make check   # lint, build, run the tests
 make run     # build Lggr.app and launch it
 ```
 
-`make help` lists the rest.
+`make help` lists the rest. No Xcode required.
 
 ## What it does
 
@@ -93,6 +116,27 @@ worse than a red one.
 `LGGR_SWIFTDATA=1` under Xcode and the app picks it up through a single `#if canImport` — no view or
 domain code changes. It has never been compiled here, so expect to fix errors the first time you open
 it in Xcode. Without it, storage is a JSON document, which is what the app uses out of the box.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). It covers the setup, where code goes, and a short list of
+things that are deliberate so you don't spend time "fixing" them.
+
+Design notes live in [`docs/_design/`](docs/_design) — including `DECISIONS.md`, which records the
+calls made under pressure and why, and `INTELLIGENCE.md`, the roadmap for the automatic tracking.
+
+## Status
+
+Honest state of things:
+
+- **What works:** focus sessions, the menu bar timer, ambient activity capture, the day timeline,
+  session review, projects, the accomplishment log, interruption capture and inbox, classification
+  rules, the weekly review, and Markdown/CSV export. 617 tests.
+- **Not verified:** that a real working day produces blocks you recognise, and that the app stays out
+  of "Apps Using Significant Energy" over eight hours on battery. Both need a real day and a human;
+  neither is claimed as done. See `docs/_design/PHASE1-ACCEPTANCE.md`.
+- **Never compiled:** the optional SwiftData backend. No toolchain on the machine this was built on
+  can type-check it, so its conformance is asserted, not verified.
 
 ## License
 
