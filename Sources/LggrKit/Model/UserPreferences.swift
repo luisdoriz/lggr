@@ -1,74 +1,8 @@
 import Foundation
 
-/// A global hot key, stored without AppKit.
-///
-/// `LggrKit` must not import AppKit, so the modifiers live as an `OptionSet` over `Int` and the key
-/// as a lowercase token. `LggrApp` maps both onto `NSEvent.ModifierFlags` / `KeyEquivalent` at the
-/// edge. Keeping the raw values explicit means a stored shortcut survives any Swift-level rename.
-public struct GlobalShortcut: Codable, Hashable, Sendable {
-
-    public struct Modifiers: OptionSet, Codable, Hashable, Sendable {
-        public let rawValue: Int
-
-        public init(rawValue: Int) {
-            self.rawValue = rawValue
-        }
-
-        public static let command = Modifiers(rawValue: 1 << 0)
-        public static let shift = Modifiers(rawValue: 1 << 1)
-        public static let option = Modifiers(rawValue: 1 << 2)
-        public static let control = Modifiers(rawValue: 1 << 3)
-
-        // Written as a bare integer rather than as an object with a `rawValue` field. Spelled out
-        // instead of left to inference, because which of the two an option set gets is a detail of
-        // conformance resolution, and this value lives in a file on the user's disk.
-        public init(from decoder: any Decoder) throws {
-            let container = try decoder.singleValueContainer()
-            self.init(rawValue: try container.decode(Int.self))
-        }
-
-        public func encode(to encoder: any Encoder) throws {
-            var container = encoder.singleValueContainer()
-            try container.encode(rawValue)
-        }
-
-        /// Modifier glyphs in the order macOS writes them.
-        public var displayString: String {
-            var glyphs = ""
-            if contains(.control) { glyphs += "⌃" }
-            if contains(.option) { glyphs += "⌥" }
-            if contains(.shift) { glyphs += "⇧" }
-            if contains(.command) { glyphs += "⌘" }
-            return glyphs
-        }
-    }
-
-    /// A lowercase key token: a single character such as `"l"`, or a named key such as `"space"`.
-    public var key: String
-    public var modifiers: Modifiers
-
-    public init(key: String, modifiers: Modifiers) {
-        self.key = key.lowercased()
-        self.modifiers = modifiers
-    }
-
-    public static let toggleSession = GlobalShortcut(key: "space", modifiers: [.command, .shift])
-
-    public var keyDisplayName: String {
-        switch key {
-        case "space": "Space"
-        case "return": "Return"
-        case "tab": "Tab"
-        case "escape": "Escape"
-        default: key.uppercased()
-        }
-    }
-
-    /// What the settings window shows, for example `⇧⌘Space`.
-    public var displayString: String {
-        modifiers.displayString + keyDisplayName
-    }
-}
+// `GlobalShortcut` used to be declared here. It now lives in `GlobalShortcut.swift` alongside the
+// actions, the defaults and the key tables the hot-key service reads — the type outgrew being a
+// preamble to this file.
 
 /// Everything the user can change, in one Codable value.
 ///
@@ -79,7 +13,26 @@ public struct UserPreferences: Codable, Hashable, Sendable {
 
     /// Pre-selected duration in the start panel when the work type has no stronger opinion.
     public var defaultSessionDuration: TimeInterval
-    public var globalShortcut: GlobalShortcut
+
+    /// Every global hot key, as the user configured it. Read at launch by `GlobalShortcutService`.
+    public var shortcuts: GlobalShortcutBindings
+
+    /// The hot key that opens the start panel.
+    ///
+    /// **This field used to be stored and unread — a setting that existed and did nothing.** It is now
+    /// a view onto `shortcuts`, which is what registration reads, so writing it changes a hot key and
+    /// reading it reports the one that is live. It stays in the type, and stays in the file, because
+    /// `SPEC.md` § "Data model" names it and because a preferences file written by any earlier build
+    /// carries it: decoding folds it into `shortcuts` as the start-session binding.
+    ///
+    /// A start-session hot key the user switched off reads as the default here — a single non-optional
+    /// combination cannot express "off", which is exactly why `shortcuts` exists and why the Shortcuts
+    /// pane reads that instead.
+    public var globalShortcut: GlobalShortcut {
+        get { shortcuts.editedShortcut(for: .startSession) }
+        set { shortcuts.set(newValue, for: .startSession) }
+    }
+
     /// Whether window titles may be read.
     ///
     /// **Nothing reads this yet, and it defaults to `false`.** No capture path supplies a title, so
@@ -106,9 +59,16 @@ public struct UserPreferences: Codable, Hashable, Sendable {
     /// slower than typing.
     public static let maxRecentOutcomes = 10
 
+    /// - Parameters:
+    ///   - shortcuts: every hot key at once, which is what the Shortcuts pane writes.
+    ///   - globalShortcut: the start-session hot key alone, kept for the callers and the stored files
+    ///     that predate `shortcuts`. It is applied *on top of* `shortcuts`, and only when `shortcuts`
+    ///     has nothing to say about the start-session action — so passing both cannot silently discard
+    ///     the richer of the two.
     public init(
         defaultSessionDuration: TimeInterval = 50 * 60,
-        globalShortcut: GlobalShortcut = .toggleSession,
+        shortcuts: GlobalShortcutBindings = .default,
+        globalShortcut: GlobalShortcut = GlobalShortcutAction.startSession.defaultShortcut,
         trackWindowTitles: Bool = false,
         idleThreshold: TimeInterval = 3 * 60,
         excludedApplications: [String] = [],
@@ -120,7 +80,10 @@ public struct UserPreferences: Codable, Hashable, Sendable {
         recentOutcomes: [String] = []
     ) {
         self.defaultSessionDuration = max(0, defaultSessionDuration)
-        self.globalShortcut = globalShortcut
+        self.shortcuts = shortcuts
+        if !shortcuts.isCustom(.startSession) {
+            self.shortcuts.set(globalShortcut, for: .startSession)
+        }
         self.trackWindowTitles = trackWindowTitles
         self.idleThreshold = max(0, idleThreshold)
         self.excludedApplications = excludedApplications
@@ -170,6 +133,7 @@ public struct UserPreferences: Codable, Hashable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case defaultSessionDuration
+        case shortcuts
         case globalShortcut
         case trackWindowTitles
         case idleThreshold
@@ -189,6 +153,8 @@ public struct UserPreferences: Codable, Hashable, Sendable {
             defaultSessionDuration: try container.decodeIfPresent(
                 TimeInterval.self, forKey: .defaultSessionDuration)
                 ?? fallback.defaultSessionDuration,
+            shortcuts: try container.decodeIfPresent(
+                GlobalShortcutBindings.self, forKey: .shortcuts) ?? .default,
             globalShortcut: try container.decodeIfPresent(
                 GlobalShortcut.self, forKey: .globalShortcut) ?? fallback.globalShortcut,
             trackWindowTitles: try container.decodeIfPresent(
@@ -209,5 +175,28 @@ public struct UserPreferences: Codable, Hashable, Sendable {
             recentOutcomes: try container.decodeIfPresent([String].self, forKey: .recentOutcomes)
                 ?? []
         )
+    }
+
+    /// Hand-written for the same reason `init(from:)` is, plus one of its own: `globalShortcut` is a
+    /// computed view onto `shortcuts` now, and the synthesised encoder writes stored properties only.
+    ///
+    /// It is still written to the file. A build that predates `shortcuts` reads that key and nothing
+    /// else, so writing it means downgrading Lggr keeps the start-session hot key the user chose
+    /// instead of silently reverting it — the same tolerance `init(from:)` extends in the other
+    /// direction.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(defaultSessionDuration, forKey: .defaultSessionDuration)
+        try container.encode(shortcuts, forKey: .shortcuts)
+        try container.encode(globalShortcut, forKey: .globalShortcut)
+        try container.encode(trackWindowTitles, forKey: .trackWindowTitles)
+        try container.encode(idleThreshold, forKey: .idleThreshold)
+        try container.encode(excludedApplications, forKey: .excludedApplications)
+        try container.encode(privateApplications, forKey: .privateApplications)
+        try container.encode(dataRetentionDays, forKey: .dataRetentionDays)
+        try container.encode(launchAtLogin, forKey: .launchAtLogin)
+        try container.encode(showTimerInMenuBar, forKey: .showTimerInMenuBar)
+        try container.encodeIfPresent(lastProjectID, forKey: .lastProjectID)
+        try container.encode(recentOutcomes, forKey: .recentOutcomes)
     }
 }

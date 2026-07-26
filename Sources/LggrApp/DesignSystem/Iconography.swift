@@ -33,6 +33,8 @@ public enum Icon {
     public static let inbox = "tray"
     public static let privacy = "hand.raised"
     public static let accessibility = "accessibility"
+    /// The Shortcuts tab in Settings.
+    public static let shortcuts = "keyboard"
 
     // MARK: Empty states
     public static let emptyToday = "sun.max"

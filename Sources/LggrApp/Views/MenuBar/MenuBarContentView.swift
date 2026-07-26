@@ -195,6 +195,10 @@ public struct MenuBarContentView: View {
             captureInterruption: environment == nil
                 ? nil
                 : { appModel?.presentCapture(inPopover: true) },
+            // Confirmed inside the popover before this is reached. `nil` with no manager to discard
+            // through, which removes the row rather than offering an irreversible action that would
+            // do nothing.
+            discard: sessionManager == nil ? nil : { discardSession() },
             openApp: {
                 leavingPopover { appModel?.select(.today) }
             }
@@ -236,6 +240,15 @@ public struct MenuBarContentView: View {
         }
     }
 
+    /// Discarding does not open a window either, and it does not hand the session to the review flow:
+    /// `SessionManager.discardActiveSession()` removes the record outright, which is what the
+    /// confirmation promised. The popover swaps to the idle menu because there is no longer a session —
+    /// that is the confirmation.
+    private func discardSession() {
+        guard let manager = sessionManager else { return }
+        Task { await manager.discardActiveSession() }
+    }
+
     /// Finishing does not open a window. The popover swaps to the idle menu with `Review last
     /// session` on top and the menu bar symbol becomes `questionmark.circle` — that is the
     /// confirmation, and the review is one click away whenever the user wants it (§ 1.3).
@@ -264,6 +277,10 @@ enum MenuBarRowID: Hashable {
     case openWeeklyReview
     case pause
     case finish
+    /// Throw the running session away. Raises a confirmation in place of itself.
+    case discardSession
+    /// The safe half of that confirmation, and where the keyboard lands while it is up.
+    case keepSession
     case openApp
 }
 
@@ -287,6 +304,10 @@ struct MenuBarRow: View {
     private let trailingText: String?
     /// The accent-tinted primary row. There is at most one per popover state.
     private let isPrimary: Bool
+    /// The confirm half of a destructive confirmation. `Palette.destructive` is the only red in Lggr
+    /// and this is the only row that may ask for it — never a row that *raises* a confirmation, only
+    /// one that completes it.
+    private let isDestructive: Bool
     private let disabledReason: String?
     private let action: () -> Void
 
@@ -302,6 +323,7 @@ struct MenuBarRow: View {
         shortcut: KeyboardShortcut? = nil,
         trailingText: String? = nil,
         isPrimary: Bool = false,
+        isDestructive: Bool = false,
         disabledReason: String? = nil,
         focus: FocusState<MenuBarRowID?>.Binding,
         action: @escaping () -> Void
@@ -312,6 +334,7 @@ struct MenuBarRow: View {
         self.shortcut = shortcut
         self.trailingText = trailingText
         self.isPrimary = isPrimary
+        self.isDestructive = isDestructive
         self.disabledReason = disabledReason
         self._focus = focus
         self.action = action
@@ -368,6 +391,7 @@ struct MenuBarRow: View {
 
     private var titleStyle: AnyShapeStyle {
         if isDisabled { return AnyShapeStyle(.tertiary) }
+        if isDestructive { return AnyShapeStyle(Palette.destructive) }
         if isPrimary { return AnyShapeStyle(Color.accentColor) }
         return AnyShapeStyle(.primary)
     }

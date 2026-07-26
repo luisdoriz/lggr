@@ -13,14 +13,20 @@ import LggrKit
 @MainActor
 public struct MenuBarActiveView: View {
 
-    /// The four things the running popover can do.
+    /// The five things the running popover can do.
     ///
     /// `captureInterruption` is optional for the same reason it is in the idle menu: the feature has
     /// not arrived, and a dimmed row that explains itself is more honest than a missing one.
+    ///
+    /// `discard` is optional on a different principle. It is the one irreversible action here, so a
+    /// host that cannot actually discard anything gets **no row at all** rather than a dimmed one:
+    /// "throw this away" is not a promise to make and then explain away on hover.
     public struct Actions {
         public var togglePause: () -> Void
         public var finish: () -> Void
         public var captureInterruption: (() -> Void)?
+        /// Called only after the popover's own confirmation has been answered.
+        public var discard: (() -> Void)?
         public var openApp: () -> Void
 
         // Spelled out rather than synthesised: the memberwise initialiser of a public struct is
@@ -29,11 +35,13 @@ public struct MenuBarActiveView: View {
             togglePause: @escaping () -> Void = {},
             finish: @escaping () -> Void = {},
             captureInterruption: (() -> Void)? = nil,
+            discard: (() -> Void)? = nil,
             openApp: @escaping () -> Void = {}
         ) {
             self.togglePause = togglePause
             self.finish = finish
             self.captureInterruption = captureInterruption
+            self.discard = discard
             self.openApp = openApp
         }
     }
@@ -45,6 +53,15 @@ public struct MenuBarActiveView: View {
     private let tracking: TrackingControls?
 
     @FocusState private var focus: MenuBarRowID?
+
+    /// Raised by the Discard row, and answered by the two rows that replace it.
+    ///
+    /// A pair of rows rather than an `.alert`: this popover lives in a window SwiftUI owns privately
+    /// and dismisses itself the moment it stops being key, so an alert raised from inside it would be
+    /// asking the window that hosts it to go away. The words are the ones the Today card's alert uses,
+    /// the confirm is the only red thing on screen, and the keyboard lands on *Keep* — every property
+    /// § 3.3 asks a destructive confirmation for, in the one shape this host can actually draw.
+    @State private var isConfirmingDiscard = false
 
     public init(
         session: FocusSession,
@@ -90,6 +107,8 @@ public struct MenuBarActiveView: View {
                 action: actions.captureInterruption ?? {}
             )
 
+            discardRows
+
             MenuBarRow(
                 id: .openApp,
                 symbol: SidebarSection.today.symbolName,
@@ -110,6 +129,62 @@ public struct MenuBarActiveView: View {
         }
         .defaultFocus($focus, MenuBarRowID.finish)
         .onMoveCommand { direction in move(direction) }
+        // A session that ended, was discarded elsewhere, or was replaced takes its question with it.
+        .onChange(of: session.id) { _, _ in isConfirmingDiscard = false }
+    }
+
+    // MARK: - Discard
+
+    /// One row, or the confirmation that replaces it.
+    ///
+    /// Until now the only way out of a session started by mistake was on the main window's Today card,
+    /// which a menu bar app spends most of its life without. `Finish` was the alternative, and it
+    /// records the mistake.
+    @ViewBuilder private var discardRows: some View {
+        if let discard = actions.discard {
+            if isConfirmingDiscard {
+                Text("This session will not be recorded. The time it has run won't appear in Today, in your history or in the weekly review.")
+                    .font(Type.caption)
+                    .foregroundStyle(Ink.support)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, Space.s)
+                    .padding(.top, Space.xs)
+
+                MenuBarRow(
+                    id: .keepSession,
+                    symbol: Icon.MenuBar.running,
+                    title: "Keep Session",
+                    focus: $focus,
+                    action: { isConfirmingDiscard = false }
+                )
+
+                MenuBarRow(
+                    id: .discardSession,
+                    symbol: Icon.delete,
+                    title: "Discard Session",
+                    isDestructive: true,
+                    focus: $focus,
+                    action: {
+                        isConfirmingDiscard = false
+                        discard()
+                    }
+                )
+            } else {
+                MenuBarRow(
+                    id: .discardSession,
+                    symbol: Icon.delete,
+                    title: "Discard Session",
+                    focus: $focus,
+                    action: {
+                        isConfirmingDiscard = true
+                        // The safe half, for the same reason `Cancel` is the default button of an
+                        // alert: a confirmation whose destructive half is one Return away has not
+                        // confirmed anything.
+                        focus = .keepSession
+                    }
+                )
+            }
+        }
     }
 
     // MARK: - Header
@@ -258,6 +333,9 @@ public struct MenuBarActiveView: View {
     private var orderedRows: [MenuBarRowID] {
         var rows: [MenuBarRowID] = [.pause, .finish]
         if actions.captureInterruption != nil { rows.append(.captureInterruption) }
+        if actions.discard != nil {
+            rows.append(contentsOf: isConfirmingDiscard ? [.keepSession, .discardSession] : [.discardSession])
+        }
         rows.append(.openApp)
         return rows
     }

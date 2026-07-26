@@ -51,6 +51,21 @@ public final class AppEnvironment {
     /// Export` is a menu command, and a menu command is available with every window closed.
     @ObservationIgnored public let exportService: ExportService
 
+    /// The floating, non-activating panel the global hot keys present into.
+    ///
+    /// Owned here for the reason that defines the feature: `⌃⇧L` works with every window closed and
+    /// without Lggr becoming the front application, so the thing it draws into cannot belong to a
+    /// window's lifetime.
+    @ObservationIgnored public let quickPanel: QuickPanelHost
+
+    /// The system-wide hot keys. Registered by `bootstrap()`, re-registered whenever the user edits
+    /// one, and observable so the Shortcuts pane can name the ones macOS refused.
+    @ObservationIgnored public let shortcutService: GlobalShortcutService
+
+    /// What each hot key does. Constructed with a handler for every action, so no combination the
+    /// Shortcuts pane offers can be registered with nothing behind it.
+    @ObservationIgnored public let quickActions: QuickActions
+
     @ObservationIgnored private var hasBootstrapped = false
 
     public init(
@@ -73,7 +88,8 @@ public final class AppEnvironment {
         // one. Constructing it records nothing; only `bootstrap()` does.
         let capture = capture ?? ActivityCapture(clock: clock, defaults: defaults)
         self.capture = capture
-        self.inbox = InboxModel(store: store, clock: clock)
+        let inbox = InboxModel(store: store, clock: clock)
+        self.inbox = inbox
 
         // Reads the same day files the sampler writes and the same privacy lists Settings edits, so
         // the daily summary can name an application exactly as far as the user has allowed and no
@@ -96,6 +112,31 @@ public final class AppEnvironment {
             }
         )
         self.exportService.showMainWindow = { [weak appModel] in appModel?.showMainWindow() }
+
+        // The hot keys. Built here, registered in `bootstrap()`.
+        //
+        // Handlers are installed *now*, before anything is registered, and that order is
+        // load-bearing: `GlobalShortcutService` refuses to register an action with no handler and
+        // reports it as a failure, so registering first would put five `.noHandler` rows in Settings
+        // describing shortcuts that are in fact fine.
+        let quickPanel = QuickPanelHost()
+        let shortcutService = GlobalShortcutService()
+        let quickActions = QuickActions(
+            sessionManager: sessionManager,
+            panel: quickPanel,
+            preferences: preferences,
+            clock: clock,
+            inbox: inbox
+        )
+        quickActions.install(into: shortcutService)
+        self.quickPanel = quickPanel
+        self.shortcutService = shortcutService
+        self.quickActions = quickActions
+
+        // Editing a shortcut in Settings re-registers it immediately. Without this the pane would
+        // save a combination that only took effect after a relaunch — which is a configurable
+        // setting that does nothing, in the one feature written to end exactly that.
+        preferences.onShortcutsChange = { [weak self] _ in self?.applyShortcuts() }
 
         // The back-reference, set after both objects exist. `startSession` goes through this object's
         // own `start(_:)` so an interruption becomes a session by exactly the path the start panel
@@ -155,6 +196,11 @@ public final class AppEnvironment {
     public func bootstrap() async {
         guard !hasBootstrapped else { return }
         hasBootstrapped = true
+        // First, and before any `await`: the hot keys are the one part of the app that has to work
+        // while it is still loading. `RegisterEventHotKey` needs no permission and no window, so there
+        // is nothing to wait for — and a `⌃⇧L` pressed a tenth of a second after login should start a
+        // session rather than fall on the floor.
+        applyShortcuts()
         await sessionManager.bootstrap()
         // Read early, because `load()` replaces the list wholesale: a capture that landed before the
         // first read came back would disappear from the screen — though never from the disk — until
@@ -163,29 +209,36 @@ public final class AppEnvironment {
         await capture.start()
     }
 
+    // MARK: - Hot keys
+
+    /// Registers exactly the shortcuts the user has configured, and nothing else.
+    ///
+    /// Called at launch and again after every edit. `GlobalShortcutService.apply(_:)` hands back every
+    /// previous registration first, so this cannot accumulate a stale hot key that no setting mentions.
+    ///
+    /// - Returns: the registrations that did not happen — a combination another application already
+    ///   holds, most often. Also published on `shortcutService.failures`, which is what the Shortcuts
+    ///   pane reads, so the return value is only for a caller that wants to react at once.
+    @discardableResult
+    public func applyShortcuts() -> [GlobalShortcutService.Failure] {
+        shortcutService.apply(preferences.shortcuts.resolved)
+    }
+
     // MARK: - Starting a session
 
     /// The start panel's context, with the user's chosen default duration folded in.
     ///
-    /// `StartSessionContext.live` reads `SessionManager.preferences`, which is loaded once at launch;
-    /// `AppPreferences` is the value the user can change while the app is running, so it wins here.
+    /// One definition, in `QuickActions`, because the panel opened by `⌘N`, by the popover and by
+    /// `⌘⇧Space` has to open pre-filled the same way in all three — and a second copy of "what the
+    /// panel starts with" is how two of the three quietly drift.
     public func startSessionContext() -> StartSessionContext {
-        var context = StartSessionContext.live(sessionManager)
-        context.defaultDuration = preferences.defaultSessionDuration
-        return context
+        quickActions.startContext()
     }
 
     /// Starts a session from a panel's request. Fire-and-forget on purpose: the interface has
     /// already moved on, and `SessionManager` reports any failure through `lastError`.
     public func start(_ request: StartSessionRequest) {
-        Task {
-            await self.sessionManager.startSession(
-                projectID: request.projectID,
-                intendedOutcome: request.intendedOutcome,
-                workType: request.workType,
-                plannedDuration: request.plannedDuration
-            )
-        }
+        quickActions.start(request)
     }
 
     /// Reveals the data folder in the Finder.
@@ -229,7 +282,7 @@ public struct StorageSummary: Hashable, Sendable {
 
 // MARK: - Preferences
 
-/// The two preferences Phase 2 can actually honour, and the only object that writes them.
+/// The preferences Phase 2 can actually honour, and the only object that writes them.
 ///
 /// ### Why this exists rather than a setter on `SessionManager`
 ///
@@ -251,6 +304,7 @@ public final class AppPreferences {
     /// Keys owned by this object alone.
     private static let durationKey = "com.lggr.settings.defaultSessionDuration"
     private static let menuBarTimerKey = "com.lggr.settings.showTimerInMenuBar"
+    private static let shortcutsKey = "com.lggr.settings.globalShortcuts"
 
     /// The `UserPreferences` blob `SessionManager` loads at launch. Duplicated here — and *only*
     /// here — because the constant is private to that file and there is no shared owner for it.
@@ -286,28 +340,65 @@ public final class AppPreferences {
         }
     }
 
+    /// Every global hot key, as the user has configured it.
+    ///
+    /// This is the setting that makes `UserPreferences.globalShortcut` real. It is written here, under
+    /// this object's own key, mirrored into the shared blob like the other two — and, unlike the other
+    /// two, it also reaches the running app immediately, through `onShortcutsChange`. It has to: a
+    /// combination that is saved but not registered is a shortcut the user presses to no effect, and a
+    /// note saying "applies the next time Lggr opens" would be a worse answer here than anywhere else
+    /// in Settings.
+    public var shortcuts: GlobalShortcutBindings {
+        get {
+            access(keyPath: \.shortcuts)
+            return shortcutsStorage
+        }
+        set {
+            guard newValue != shortcutsStorage else { return }
+            withMutation(keyPath: \.shortcuts) { shortcutsStorage = newValue }
+            if let data = try? JSONEncoder().encode(newValue) {
+                defaults.set(data, forKey: Self.shortcutsKey)
+            }
+            applyToStoredPreferences()
+            onShortcutsChange?(newValue)
+        }
+    }
+
+    /// Called after `shortcuts` has been written, so the composition root can re-register them.
+    ///
+    /// A callback rather than a direct reference to `GlobalShortcutService`: this object is constructed
+    /// before the service exists — `AppEnvironment.live()` applies it to the stored blob *before*
+    /// `SessionManager` is built — and Settings should not have to know that registration is a thing.
+    @ObservationIgnored public var onShortcutsChange: (@MainActor (GlobalShortcutBindings) -> Void)?
+
     /// Written through `access`/`withMutation` above: the `@Observable` macro synthesises accessors
     /// for a stored property, and a property cannot have both those and a custom body.
     @ObservationIgnored private var durationStorage: TimeInterval
     @ObservationIgnored private var timerStorage: Bool
+    @ObservationIgnored private var shortcutsStorage: GlobalShortcutBindings
     @ObservationIgnored private let defaults: UserDefaults
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
 
         // First run — or an install that predates these keys — inherits whatever the shared blob
-        // already says, so nothing resets the moment this object is introduced.
+        // already says, so nothing resets the moment this object is introduced. For the shortcuts that
+        // is more than politeness: the blob is where a hand-edited `globalShortcut`, and one written by
+        // any earlier build, arrives from.
         let stored = Self.loadStoredPreferences(from: defaults)
         let storedDuration = defaults.object(forKey: Self.durationKey) as? Double
         let storedTimer = defaults.object(forKey: Self.menuBarTimerKey) as? Bool
+        let storedShortcuts = defaults.data(forKey: Self.shortcutsKey)
+            .flatMap { try? JSONDecoder().decode(GlobalShortcutBindings.self, from: $0) }
 
         self.durationStorage = Self.clampDuration(storedDuration ?? stored.defaultSessionDuration)
         self.timerStorage = storedTimer ?? stored.showTimerInMenuBar
+        self.shortcutsStorage = storedShortcuts ?? stored.shortcuts
     }
 
     // MARK: Mirroring
 
-    /// Copies both values into the shared `UserPreferences` blob, preserving everything else in it.
+    /// Copies these values into the shared `UserPreferences` blob, preserving everything else in it.
     ///
     /// Load-modify-save rather than encode-from-scratch: the blob also carries the remembered
     /// project and the recent outcomes, and Settings has no business forgetting either.
@@ -316,10 +407,12 @@ public final class AppPreferences {
         guard
             stored.defaultSessionDuration != durationStorage
                 || stored.showTimerInMenuBar != timerStorage
+                || stored.shortcuts != shortcutsStorage
         else { return }
 
         stored.defaultSessionDuration = durationStorage
         stored.showTimerInMenuBar = timerStorage
+        stored.shortcuts = shortcutsStorage
         guard let data = try? JSONEncoder().encode(stored) else { return }
         defaults.set(data, forKey: Self.storedPreferencesKey)
     }

@@ -97,6 +97,11 @@ public enum Layout {
     /// sideways as the label goes from "May 2026" to "September 2026".
     public static let historyRangeLabelWidth: CGFloat = 132
 
+    /// The shortcut recorder in Settings ▸ Shortcuts. A minimum, not a fixed width: it has to hold
+    /// `Press keys…` without the two buttons beside it moving every time a row starts listening, and
+    /// nothing shorter does.
+    public static let shortcutFieldWidth: CGFloat = 96
+
     // Component metrics
     /// The project colour dot before a project name (04-screens.md § 2.5).
     public static let projectDotSize: CGFloat = 8

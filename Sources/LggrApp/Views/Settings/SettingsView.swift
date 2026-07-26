@@ -3,19 +3,25 @@ import SwiftUI
 
 // Settings. See docs/_design/04-screens.md § 4.7.
 //
-// § 4.7 draws five tabs. **This ships two**, because every control on them changes something the user
-// can observe, and a pane full of switches wired to nothing is worse than a short pane: it teaches
-// the user that this screen does not do anything.
+// § 4.7 draws five tabs. **This ships three**, because every control on them changes something the
+// user can observe, and a pane full of switches wired to nothing is worse than a short pane: it
+// teaches the user that this screen does not do anything.
 //
 //   • **General** — the default session duration, the menu bar timer, and where the work is kept.
+//   • **Shortcuts** — the five global hot keys, each with a recorder, a reset and a way to switch it
+//     off, and each registered the moment it is recorded. `ShortcutSettingsView`.
 //   • **Privacy** — the tracking switch, the two application lists, the retention period, delete
 //     history, and the plain statement of what is on disk. All of it `PrivacySettingsView`, which is
 //     the whole of what makes an app that records without being asked acceptable.
 //
-// Three tabs § 4.7 draws are absent, and each is absent for the same reason: **Shortcuts** would
-// configure a global hot key that is not registered, **Notifications** would configure notifications
-// that are not posted, and **Tracking** would duplicate controls Privacy already owns. None of them
-// is a preference Lggr can honour today.
+// **Shortcuts used to be absent from this list, for the reason this comment used to give: it would
+// have configured a global hot key that nothing registered.** `GlobalShortcutService` registers them
+// now, `QuickActions` gives every one of them something to do, and the pane reports the registrations
+// macOS refused — so the tab is here, and the condition it was waiting on is the condition it met.
+//
+// Two tabs § 4.7 draws are still absent, and each is absent for the same reason the third was:
+// **Notifications** would configure notifications that are not posted, and **Tracking** would
+// duplicate controls Privacy already owns. Neither is a preference Lggr can honour today.
 //
 // `UserPreferences.trackWindowTitles` is deliberately not surfaced anywhere. It governs a capability
 // that does not exist: `ActivityInterval` has no field for a window title, Lggr never reads one, and
@@ -63,6 +69,7 @@ public struct SettingsView: View {
     /// which is almost never the thing they left last week.
     private enum Tab: Hashable {
         case general
+        case shortcuts
         case privacy
     }
 
@@ -72,6 +79,11 @@ public struct SettingsView: View {
     /// toggle needs to say when it takes effect.
     private let liveShowsTimerInMenuBar: Bool
     private let privacy: PrivacyModel
+    /// The live hot-key registrations, so the Shortcuts tab can name the ones macOS refused.
+    ///
+    /// Optional for the same reason the reveal closures are: the gallery and the snapshot renderer draw
+    /// this pane with no composition root behind it.
+    private let shortcutService: GlobalShortcutService?
     private let onRevealDataFolder: (() -> Void)?
     private let onRevealActivityFolder: (() -> Void)?
     private let host: Host
@@ -86,6 +98,7 @@ public struct SettingsView: View {
         storage: StorageSummary,
         liveShowsTimerInMenuBar: Bool,
         privacy: PrivacyModel,
+        shortcutService: GlobalShortcutService? = nil,
         onRevealDataFolder: (() -> Void)? = nil,
         onRevealActivityFolder: (() -> Void)? = nil,
         host: Host = .window
@@ -94,6 +107,7 @@ public struct SettingsView: View {
         self.storage = storage
         self.liveShowsTimerInMenuBar = liveShowsTimerInMenuBar
         self.privacy = privacy
+        self.shortcutService = shortcutService
         self.onRevealDataFolder = onRevealDataFolder
         self.onRevealActivityFolder = onRevealActivityFolder
         self.host = host
@@ -113,6 +127,7 @@ public struct SettingsView: View {
             storage: environment.storage,
             liveShowsTimerInMenuBar: environment.sessionManager.preferences.showTimerInMenuBar,
             privacy: environment.capture.privacy,
+            shortcutService: environment.shortcutService,
             onRevealDataFolder: { environment.revealDataFolder() },
             onRevealActivityFolder: { environment.revealActivityFolder() },
             host: host
@@ -137,8 +152,8 @@ public struct SettingsView: View {
         .accessibilityLabel("Settings")
     }
 
-    /// Two tabs in both hosts, so `⌘,` and `⌘7` are the same screen rather than two arrangements of
-    /// it. Both panes are rendered with `host: .window` — the tab already names the room, and a
+    /// Three tabs in both hosts, so `⌘,` and `⌘7` are the same screen rather than two arrangements of
+    /// it. Every pane is rendered with `host: .window` — the tab already names the room, and a
     /// section title repeating the tab label above it is the sort of thing that makes a settings
     /// screen feel generated.
     private var tabs: some View {
@@ -146,6 +161,10 @@ public struct SettingsView: View {
             general
                 .tabItem { Label("General", systemImage: SidebarSection.settings.symbolName) }
                 .tag(Tab.general)
+
+            ShortcutSettingsView(preferences: preferences, service: shortcutService)
+                .tabItem { Label("Shortcuts", systemImage: Icon.shortcuts) }
+                .tag(Tab.shortcuts)
 
             PrivacySettingsView(
                 model: privacy,
