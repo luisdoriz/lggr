@@ -209,6 +209,146 @@ public final class SessionManager {
         await reloadTodaySessions()
     }
 
+    // MARK: - Discarding and deleting
+
+    /// Ends the active session and removes it, leaving no record of it anywhere.
+    ///
+    /// The exit for a session started by mistake. Until this existed the only way out of a session
+    /// was `Finish`, and with no delete either, a session begun by pressing the wrong thing stayed in
+    /// the log for good — which is how a trustworthy record of a day acquires entries that never
+    /// happened.
+    ///
+    /// It is deliberately *not* `finish` followed by `delete`: finishing hands the session to the
+    /// review flow, and a "What happened?" sheet for work the user has just said did not happen is
+    /// the one thing this must not do. So the heartbeat stops, `activeSession` clears, nothing is left
+    /// in `pendingReview`, and the record is removed.
+    ///
+    /// - Returns: `false` when nothing was running, so a caller cannot mistake a no-op for a discard.
+    @discardableResult
+    public func discardActiveSession() async -> Bool {
+        guard let session = activeSession else { return false }
+
+        activeSession = nil
+        // A session cannot be active and awaiting review at the same time, so this can only match a
+        // value left behind by a restore. Clearing it *by id* is what makes the promise above true
+        // without throwing away somebody else's unanswered review.
+        if pendingReview?.id == session.id { pendingReview = nil }
+        todaySessions.removeAll { $0.id == session.id }
+        pauseCounts[session.id] = nil
+        now = clock.now
+        // `activeSession` is already `nil`, so this is the call that stands the heartbeat down.
+        syncTick()
+
+        await remove(sessionID: session.id, failureMessage: "Couldn't discard that session.")
+        return true
+    }
+
+    /// Removes a session from the log.
+    ///
+    /// Interface first, disk second, like every other mutation here: the row leaves the screen at
+    /// once. A failed delete re-reads today rather than leaving a list that claims a session is gone
+    /// while it is still on disk — the banner says what happened and the row comes back.
+    ///
+    /// Deleting the session that is currently running is allowed and stops the clock. It is reached
+    /// only from a list of *finished* sessions today, but the store keys on an id and so does this.
+    public func deleteSession(id: UUID) async {
+        if activeSession?.id == id {
+            activeSession = nil
+            now = clock.now
+            syncTick()
+        }
+        if pendingReview?.id == id { pendingReview = nil }
+        todaySessions.removeAll { $0.id == id }
+        pauseCounts[id] = nil
+
+        await remove(sessionID: id, failureMessage: "Couldn't delete that session.")
+    }
+
+    private func remove(sessionID: UUID, failureMessage: String) async {
+        do {
+            try await store.deleteSession(id: sessionID)
+        } catch {
+            report(failureMessage)
+            await reloadTodaySessions()
+        }
+    }
+
+    // MARK: - Correcting the times
+
+    /// Corrects a finished session's start and end, and reports what the correction cost.
+    ///
+    /// The everyday case is "I forgot to press stop and it recorded four hours". All of the
+    /// arithmetic — clamping an inverted range, closing a pause left open, fitting the recorded pauses
+    /// inside a shortened span — belongs to `FocusSession.reschedule(start:end:at:)`; this method
+    /// hands it the instant, writes the result, and passes the report back up so the caller can say
+    /// what changed.
+    ///
+    /// - Returns: the corrected record and what the domain reported, or `nil` when the session has not
+    ///   finished and nothing was touched. A running session's end is not a stored value yet, so
+    ///   there is nothing to correct; `adjustPlannedDuration(to:)` is what changes a live session.
+    @discardableResult
+    public func reschedule(
+        session: FocusSession,
+        start: Date,
+        end: Date
+    ) async -> (corrected: FocusSession, report: SessionRescheduleResult)? {
+        var corrected = session
+        // Not named `report`: that is the name of this type's error-reporting method, and shadowing it
+        // inside the one function that also has to call it is a trap for the next reader.
+        guard let outcome = corrected.reschedule(start: start, end: end, at: clock.now) else {
+            report("Only a session that has finished can have its times corrected.")
+            return nil
+        }
+
+        if let index = todaySessions.firstIndex(where: { $0.id == corrected.id }) {
+            todaySessions[index] = corrected
+        }
+        if pendingReview?.id == corrected.id { pendingReview = corrected }
+
+        await persist(corrected, failureMessage: "Couldn't save the corrected times.")
+        // Correcting a forgotten stop time can move a session into or out of today, so today is
+        // re-read rather than patched: that is the whole point of the edit.
+        await reloadTodaySessions()
+
+        return (corrected, outcome)
+    }
+
+    // MARK: - Adjusting the target
+
+    /// Changes the running session's target duration. `nil` makes it open-ended.
+    ///
+    /// Deliberately does not stamp `editedAt`: a target is a statement of intent, not evidence, and
+    /// revising it leaves every recorded time exactly as it was observed. `FocusSession`'s own
+    /// documentation for `adjustPlannedDuration(to:)` carries the reasoning.
+    ///
+    /// Synchronous, and persisted in the background, exactly as `togglePause()` is: this is a button
+    /// under a live timer, and a button that waits on a file is a button that feels slow.
+    public func adjustPlannedDuration(to target: TimeInterval?) {
+        guard var session = activeSession else { return }
+        let previous = session.plannedDuration
+        session.adjustPlannedDuration(to: target)
+        guard session.plannedDuration != previous else { return }
+
+        activeSession = session
+        now = clock.now
+
+        let snapshot = session
+        Task { [weak self] in
+            await self?.persist(snapshot, failureMessage: "Couldn't save the new target.")
+        }
+    }
+
+    /// Moves the running session's target by `delta` seconds — the `+10` / `−10` controls.
+    ///
+    /// An open-ended session has no target to move, so the time already spent is the base: `+10` then
+    /// means "ten minutes more from where I am", which is the only reading that does not invent a
+    /// number. The domain clamps at zero, so `−10` can shorten a target to nothing but never past it.
+    public func adjustPlannedDuration(by delta: TimeInterval) {
+        guard let session = activeSession else { return }
+        let base = session.plannedDuration ?? session.elapsed(at: clock.now)
+        adjustPlannedDuration(to: max(0, base + delta))
+    }
+
     // MARK: - Review
 
     /// Answers "What happened?" and files the session.

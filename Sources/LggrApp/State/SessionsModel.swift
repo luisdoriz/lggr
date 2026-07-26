@@ -577,6 +577,17 @@ public final class SessionsModel {
         }
     }
 
+    /// Drops a session this model is showing, because it has been deleted.
+    ///
+    /// The mirror of `apply(_:)`, and needed for the same reason: the row leaves the screen before the
+    /// store write, so this model has to be able to forget a session without re-reading the window. An
+    /// open detail for it closes too — a pushed screen describing a record that no longer exists is the
+    /// one state a delete must not leave behind.
+    public func remove(sessionID: UUID) {
+        sessions.removeAll { $0.id == sessionID }
+        if detail?.session.id == sessionID { closeDetail() }
+    }
+
     // MARK: - Matching
 
     /// Case- and diacritic-insensitive, across the three fields that hold the user's own words about

@@ -68,6 +68,13 @@ public enum Layout {
     public static let captureSheetWidth: CGFloat = 420
     /// The project editor sheet (04-screens.md § 4.5).
     public static let projectEditorWidth: CGFloat = 420
+    /// The sheet that corrects a finished session's times.
+    ///
+    /// The one width here that `04-screens.md` does not state, because the screen it belongs to
+    /// post-dates the document. It takes the start panel's 460 rather than a fourth number: the two
+    /// are the same shape of form — a couple of labelled controls with a derived line underneath —
+    /// and a date-and-time picker needs every one of those points to sit on one line.
+    public static let sessionEditWidth: CGFloat = 460
     /// The rule editor sheet (04-screens.md § 4.6). Wider than the project editor because a rule is
     /// a sentence with two halves, and both halves have to fit on one line to be read as one.
     public static let ruleEditorWidth: CGFloat = 480

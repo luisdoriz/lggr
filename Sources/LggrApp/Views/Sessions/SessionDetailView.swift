@@ -32,6 +32,10 @@ public struct SessionDetailActions {
     /// Persists an edited session. `nil` makes the four fields read-only, which is the honest
     /// rendering when the host cannot save.
     public var save: ((FocusSession) -> Void)?
+    /// Opens `SessionEditSheet` to correct the recorded times. Separate from `save` because the four
+    /// fields are the user's words about work already done, while this changes the measurement itself —
+    /// which is why it goes through a sheet that can warn before it writes.
+    public var editTimes: (() -> Void)?
     public var addAccomplishment: () -> Void
     public var editAccomplishment: (Accomplishment) -> Void
 
@@ -39,12 +43,14 @@ public struct SessionDetailActions {
         back: @escaping () -> Void = {},
         review: (() -> Void)? = nil,
         save: ((FocusSession) -> Void)? = nil,
+        editTimes: (() -> Void)? = nil,
         addAccomplishment: @escaping () -> Void = {},
         editAccomplishment: @escaping (Accomplishment) -> Void = { _ in }
     ) {
         self.back = back
         self.review = review
         self.save = save
+        self.editTimes = editTimes
         self.addAccomplishment = addAccomplishment
         self.editAccomplishment = editAccomplishment
     }
@@ -157,6 +163,31 @@ public struct SessionDetailView: View {
                 .textSelection(.enabled)
 
             metadata
+            provenance
+        }
+    }
+
+    /// Design decision A, in the one place there is room to say it in full: this session's times were
+    /// entered by hand, and here is when.
+    ///
+    /// A plain caption in `.secondary` with the ordinary pencil — never a warning colour, never a
+    /// triangle, and never phrased as if a correction were a mistake. The weekly review is only
+    /// trustworthy if a number the user typed is distinguishable from one Lggr watched, and this is
+    /// that distinction being kept rather than being hidden.
+    @ViewBuilder private var provenance: some View {
+        if let editedAt = session.editedAt {
+            Label(
+                "Times corrected by hand on "
+                    + editedAt.formatted(.dateTime.weekday(.wide).day().month(.wide)),
+                systemImage: Icon.edit
+            )
+            .labelStyle(.titleAndIcon)
+            .imageScale(.small)
+            .font(Type.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityLabel("Provenance")
+            .accessibilityValue(EditedMark.help(editedAt))
         }
     }
 
@@ -248,7 +279,13 @@ public struct SessionDetailView: View {
         let items = factItems
         if !items.isEmpty {
             VStack(alignment: .leading, spacing: Space.m) {
-                SectionHeader("Session")
+                // The numbers and the way to correct them, together. A user who has just read "4h 12m"
+                // and knows it is wrong should not have to go back to the list to fix it.
+                if let editTimes = actions.editTimes {
+                    SectionHeader("Session", actionTitle: "Correct times…", action: editTimes)
+                } else {
+                    SectionHeader("Session")
+                }
                 HStack(alignment: .top, spacing: Space.xl) {
                     ForEach(items, id: \.label) { item in
                         VStack(alignment: .leading, spacing: Space.xxs) {

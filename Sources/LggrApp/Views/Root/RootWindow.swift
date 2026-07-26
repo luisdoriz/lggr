@@ -274,7 +274,11 @@ private struct RootWindowContent: View {
                     project: project(for: session.projectID),
                     now: { manager.now },
                     onTogglePause: { manager.togglePause() },
-                    onFinish: { finishSession() }
+                    onFinish: { finishSession() },
+                    onAdjustPlan: { delta in manager.adjustPlannedDuration(by: delta) },
+                    onSetPlan: { target in manager.adjustPlannedDuration(to: target) },
+                    // The card has already confirmed by the time this runs.
+                    onDiscard: { discardActiveSession() }
                 )
             }
         }
@@ -288,9 +292,9 @@ private struct RootWindowContent: View {
         }
     }
 
-    /// Deletion is deliberately absent: `SessionManager` has no delete for sessions or
-    /// accomplishments in Phase 2, and `TodayActions` drops the menu item when the handler is `nil`.
-    /// A menu that offers an action it cannot perform is worse than one that does not offer it.
+    /// Accomplishment deletion is still deliberately absent: `SessionManager` has no delete for one,
+    /// and `TodayActions` drops the menu item when the handler is `nil`. A menu that offers an action it
+    /// cannot perform is worse than one that does not offer it.
     private var todayActions: TodayActions {
         TodayActions(
             startSession: { appModel.presentStartPanel(inPopover: false) },
@@ -300,7 +304,12 @@ private struct RootWindowContent: View {
                 appModel.presentAccomplishmentEditor(sessionID: session.id)
             },
             editAccomplishment: { editingAccomplishment = $0 },
-            reviewInbox: { appModel.presentInbox() }
+            reviewInbox: { appModel.presentInbox() },
+            editSessionTimes: { session in
+                appModel.presentSessionEditor(sessionID: session.id)
+            },
+            // The row has already confirmed by the time this runs.
+            deleteSession: { session in delete(session) }
         )
     }
 
@@ -328,6 +337,10 @@ private struct RootWindowContent: View {
                 addAccomplishment: { session in
                     appModel.presentAccomplishmentEditor(sessionID: session.id)
                 },
+                editTimes: { session in
+                    appModel.presentSessionEditor(sessionID: session.id)
+                },
+                delete: { session in delete(session) },
                 step: { steps in Task { await sessionsModel.step(steps) } },
                 setSpan: { span in Task { await sessionsModel.setSpan(span) } },
                 goToLatest: { Task { await sessionsModel.goToLatest() } },
@@ -361,6 +374,9 @@ private struct RootWindowContent: View {
                         // and the manager writes it, exactly as every other mutation in the app does.
                         sessionsModel.apply(updated)
                         Task { await manager.update(updated) }
+                    },
+                    editTimes: {
+                        appModel.presentSessionEditor(sessionID: detail.session.id)
                     },
                     addAccomplishment: {
                         appModel.presentAccomplishmentEditor(sessionID: detail.session.id)
@@ -562,6 +578,36 @@ private struct RootWindowContent: View {
             )
         case .interruptionAccomplishment(let interruptionID):
             interruptionAccomplishmentPanel(interruptionID: interruptionID)
+        case .editSession(let sessionID):
+            sessionEditPanel(sessionID: sessionID)
+        }
+    }
+
+    /// "Correct the times", opened from Today, from the history or from a pushed detail.
+    ///
+    /// Refuses a session that has not finished rather than inventing an `endedAt` for it — the same
+    /// refusal `FocusSession.reschedule(start:end:at:)` makes, for the same reason. A running session's
+    /// end is not a stored value yet, and the way to change one is the plan line on its card.
+    @ViewBuilder private func sessionEditPanel(sessionID: UUID) -> some View {
+        if let session = session(withID: sessionID), session.isFinished {
+            SessionEditSheet(
+                session: session,
+                project: project(for: session.projectID),
+                now: environment.clock.now,
+                onSave: { start, end in
+                    correctTimes(session, start: start, end: end)
+                    appModel.dismissSheet()
+                },
+                onCancel: { appModel.dismissSheet() }
+            )
+        } else {
+            // The session was deleted, or finished elsewhere, while this route was up. Nothing to
+            // correct, so the sheet closes itself rather than showing a form with no subject — the
+            // arrangement every other route here uses for the same race.
+            Color.clear
+                .frame(width: 1, height: 1)
+                .onAppear { appModel.dismissSheet() }
+                .accessibilityHidden(true)
         }
     }
 
@@ -693,6 +739,45 @@ private struct RootWindowContent: View {
         appModel.presentReview()
     }
 
+    /// Discards the session in flight. Confirmed on the card before this is reached.
+    private func discardActiveSession() {
+        Task {
+            guard await manager.discardActiveSession() else { return }
+            // A discarded session was never in the history — it had not finished — but the range may
+            // have been loaded before it was started, so this costs one local read and removes the one
+            // state where a deleted record could still be on screen.
+            await sessionsModel.reloadIfCurrent()
+        }
+    }
+
+    /// Deletes a session. Confirmed on the row before this is reached.
+    ///
+    /// Interface first, disk second: the row leaves the list and any detail pushed on top of it is
+    /// popped, then the write goes out. A pushed screen describing a record that no longer exists is
+    /// the one state a delete must not leave behind.
+    private func delete(_ session: FocusSession) {
+        if sessionsModel.detail?.session.id == session.id { popDetail() }
+        sessionsModel.remove(sessionID: session.id)
+        Task { await manager.deleteSession(id: session.id) }
+    }
+
+    /// Writes corrected times, then brings every screen showing that session up to date.
+    ///
+    /// The warning about reduced pause time has already been read: `SessionEditSheet` puts it in front
+    /// of the user before it calls this, from the same `SessionRescheduleResult` the write applies.
+    private func correctTimes(_ session: FocusSession, start: Date, end: Date) {
+        Task {
+            guard
+                let outcome = await manager.reschedule(session: session, start: start, end: end)
+            else { return }
+            // The corrected record first, so the list and any open detail move at once.
+            sessionsModel.apply(outcome.corrected)
+            // Then the range, because a corrected start can move a session to another day — or out of
+            // the window on screen entirely, which is the point of correcting a forgotten stop time.
+            await sessionsModel.reload()
+        }
+    }
+
     private func submit(_ review: SessionReview) {
         Task {
             await manager.submitReview(
@@ -741,10 +826,17 @@ private struct RootWindowContent: View {
         return manager.projects.first { $0.id == id }
     }
 
+    /// Resolves an id against everything this window currently holds.
+    ///
+    /// The order is nearest-first: the session in flight and the one awaiting review are the live
+    /// copies, today's list next, then the pushed detail and the loaded history range. A route carries
+    /// an id precisely so it can be raised from any of those five and still find its subject.
     private func session(withID id: UUID) -> FocusSession? {
         if let pending = manager.pendingReview, pending.id == id { return pending }
         if let active = manager.activeSession, active.id == id { return active }
-        return manager.todaySessions.first { $0.id == id }
+        if let today = manager.todaySessions.first(where: { $0.id == id }) { return today }
+        if let open = sessionsModel.detail?.session, open.id == id { return open }
+        return sessionsModel.sessions.first { $0.id == id }
     }
 
     /// A blank accomplishment, or one pre-filled from the session that offered it.

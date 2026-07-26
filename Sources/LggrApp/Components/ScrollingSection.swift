@@ -39,8 +39,13 @@ import SwiftUI
 /// - `TextEditor` — the review sheet's Summary field.
 /// - `.buttonStyle(.borderless)` and `.buttonStyle(.link)` — the quiet section and panel actions.
 ///   `.plain` and the default style render fine.
+/// - `DatePicker`, in **every** style — the two pickers on `SessionEditSheet`. `.field` and
+///   `.stepperField` were both measured and both come back as the placeholder; it is an AppKit control
+///   rather than a composition of shapes. The rest of that sheet photographs, so its snapshots still
+///   prove the copy, the layout and both of its notice states.
+/// - `Menu` with `.menuStyle(.borderlessButton)` — the active session's `Set target` control.
 ///
-/// All three draw correctly in the running app; they need an AppKit host that `ImageRenderer` does
+/// All of them draw correctly in the running app; they need an AppKit host that `ImageRenderer` does
 /// not provide. **Do not swap them out to make a snapshot prettier** — that would trade real
 /// interface quality for a photograph of it. A reviewer reading a snapshot should know that a yellow
 /// block means "the camera could not see this control", not "this control is broken".

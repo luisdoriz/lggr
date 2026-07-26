@@ -46,6 +46,13 @@ public struct SessionsActions {
     public var open: (FocusSession) -> Void
     public var review: ((FocusSession) -> Void)?
     public var addAccomplishment: (FocusSession) -> Void
+    /// Opens `SessionEditSheet` for a session whose recorded times are wrong. Optional in the same
+    /// spirit `review` is: without a host that can save the correction, the item is absent rather than
+    /// inert.
+    public var editTimes: ((FocusSession) -> Void)?
+    /// Removes a session from the log. The row confirms first — this is called after the user has said
+    /// yes.
+    public var delete: ((FocusSession) -> Void)?
     public var step: (Int) -> Void
     public var setSpan: (HistoryWindow.Span) -> Void
     public var goToLatest: () -> Void
@@ -56,6 +63,8 @@ public struct SessionsActions {
         open: @escaping (FocusSession) -> Void = { _ in },
         review: ((FocusSession) -> Void)? = nil,
         addAccomplishment: @escaping (FocusSession) -> Void = { _ in },
+        editTimes: ((FocusSession) -> Void)? = nil,
+        delete: ((FocusSession) -> Void)? = nil,
         step: @escaping (Int) -> Void = { _ in },
         setSpan: @escaping (HistoryWindow.Span) -> Void = { _ in },
         goToLatest: @escaping () -> Void = {},
@@ -65,6 +74,8 @@ public struct SessionsActions {
         self.open = open
         self.review = review
         self.addAccomplishment = addAccomplishment
+        self.editTimes = editTimes
+        self.delete = delete
         self.step = step
         self.setSpan = setSpan
         self.goToLatest = goToLatest
@@ -222,7 +233,9 @@ public struct SessionsListView: View {
                                     project: project(for: session.projectID),
                                     onOpen: { actions.open(session) },
                                     onReview: reviewAction(for: session),
-                                    onAddAccomplishment: { actions.addAccomplishment(session) }
+                                    onAddAccomplishment: { actions.addAccomplishment(session) },
+                                    onEditTimes: handler(actions.editTimes, for: session),
+                                    onDelete: handler(actions.delete, for: session)
                                 )
                             }
                         }
@@ -360,6 +373,17 @@ public struct SessionsListView: View {
         guard session.resultStatus == nil, let review = actions.review else { return nil }
         return { review(session) }
     }
+
+    /// Binds one of the optional per-session actions to a row, or hands back `nil` so the row drops the
+    /// menu item. Written once rather than as an inline `Optional.map` at each call site, so the
+    /// closure-returning-a-closure type is spelled out in one place — the arrangement `TodayView` uses.
+    private func handler(
+        _ action: ((FocusSession) -> Void)?,
+        for session: FocusSession
+    ) -> (() -> Void)? {
+        guard let action else { return nil }
+        return { action(session) }
+    }
 }
 
 // MARK: - The row
@@ -381,8 +405,11 @@ struct SessionHistoryRow: View {
     var onOpen: (() -> Void)?
     var onReview: (() -> Void)?
     var onAddAccomplishment: (() -> Void)?
+    var onEditTimes: (() -> Void)?
+    var onDelete: (() -> Void)?
 
     @State private var isHovered = false
+    @State private var isConfirmingDelete = false
 
     var body: some View {
         HStack(alignment: .top, spacing: Space.m) {
@@ -429,6 +456,15 @@ struct SessionHistoryRow: View {
         .onHover { isHovered = $0 }
         .lggrAnimation(Motion.tap, value: isHovered)
         .contextMenu { actionItems }
+        // Word for word the alert Today's row raises, because it is the same act on the same record and
+        // two wordings would be two promises. § 3.3 allows the alert here: destructive confirmation is
+        // one of its two cases, and the confirm button is the only red in the screen.
+        .alert("Delete this session?", isPresented: $isConfirmingDelete) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete Session", role: .destructive) { onDelete?() }
+        } message: {
+            Text("This removes the session and its summary. Accomplishments you logged stay where they are.")
+        }
     }
 
     // MARK: Metadata
@@ -447,6 +483,9 @@ struct SessionHistoryRow: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
+            if let editedAt = session.editedAt {
+                EditedMark(editedAt: editedAt)
+            }
         }
         .accessibilityHidden(true)
     }
@@ -523,9 +562,16 @@ struct SessionHistoryRow: View {
         if let onAddAccomplishment {
             Button("Add accomplishment", action: onAddAccomplishment)
         }
+        if let onEditTimes {
+            Button("Correct times…", action: onEditTimes)
+        }
         Button("Copy outcome") { Pasteboard.copy(session.intendedOutcome) }
         if let summary = session.resultSummary, !summary.isEmpty {
             Button("Copy summary") { Pasteboard.copy(summary) }
+        }
+        if onDelete != nil {
+            Divider()
+            Button("Delete Session", role: .destructive) { isConfirmingDelete = true }
         }
     }
 
@@ -543,6 +589,7 @@ struct SessionHistoryRow: View {
             parts.append(SessionHistoryRow.interruptionPhrase(session.interruptionCount))
         }
         parts.append(session.resultStatus?.displayName ?? "Not reviewed")
+        if session.wasEdited { parts.append(EditedMark.spoken) }
         return parts.joined(separator: ", ")
     }
 }

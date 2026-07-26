@@ -66,7 +66,10 @@ public struct FocusSession: Identifiable, Codable, Hashable, Sendable {
     public var workType: WorkType
     /// `nil` means open-ended: the timer counts up with no target.
     public var plannedDuration: TimeInterval?
-    public let startedAt: Date
+    /// `var` rather than `let` only so that `reschedule(start:end:at:)` can correct a mistyped or
+    /// forgotten stop time. Nothing else in the package writes it: every transition in
+    /// `SessionClock` still treats it as the fixed origin of the clock and clamps against it.
+    public var startedAt: Date
     public var endedAt: Date?
     /// Sum of every pause that has been closed. Never negative.
     public var pausedDuration: TimeInterval
@@ -91,6 +94,18 @@ public struct FocusSession: Identifiable, Codable, Hashable, Sendable {
     /// Interruptions captured during this session. Denormalised so a session row can be rendered
     /// without querying the interruption store.
     public var interruptionCount: Int
+    /// When the user last corrected this session's times by hand, or `nil` if every timestamp on it
+    /// was observed.
+    ///
+    /// Provenance, not an error flag. Lggr's claim is that it is trustworthy evidence of your day,
+    /// which means a hand-entered number must never be presented as an observed one — the same
+    /// honesty the timeline already applies to gaps it cannot explain. The weekly review and the
+    /// session list read this to say so quietly; nothing reads it as a warning, and no total is
+    /// discounted because of it.
+    ///
+    /// Set by `reschedule(start:end:at:)` only. Changing `plannedDuration` does not set it: a target
+    /// is intent, not evidence, and adjusting it leaves every recorded time exactly as observed.
+    public var editedAt: Date?
 
     public init(
         id: UUID = UUID(),
@@ -109,7 +124,8 @@ public struct FocusSession: Identifiable, Codable, Hashable, Sendable {
         blocker: String? = nil,
         nextStep: String? = nil,
         isReactive: Bool? = nil,
-        interruptionCount: Int = 0
+        interruptionCount: Int = 0,
+        editedAt: Date? = nil
     ) {
         self.id = id
         self.projectID = projectID
@@ -128,5 +144,6 @@ public struct FocusSession: Identifiable, Codable, Hashable, Sendable {
         self.nextStep = nextStep
         self.isReactive = isReactive ?? workType.isReactiveByDefault
         self.interruptionCount = max(0, interruptionCount)
+        self.editedAt = editedAt
     }
 }

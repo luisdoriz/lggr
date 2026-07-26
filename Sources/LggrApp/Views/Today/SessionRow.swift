@@ -24,6 +24,7 @@ public struct SessionRow: View {
     private let project: Project?
     private let onReview: (() -> Void)?
     private let onAddAccomplishment: (() -> Void)?
+    private let onEditTimes: (() -> Void)?
     private let onDelete: (() -> Void)?
 
     @State private var isHovered = false
@@ -34,12 +35,14 @@ public struct SessionRow: View {
         project: Project?,
         onReview: (() -> Void)? = nil,
         onAddAccomplishment: (() -> Void)? = nil,
+        onEditTimes: (() -> Void)? = nil,
         onDelete: (() -> Void)? = nil
     ) {
         self.session = session
         self.project = project
         self.onReview = onReview
         self.onAddAccomplishment = onAddAccomplishment
+        self.onEditTimes = onEditTimes
         self.onDelete = onDelete
     }
 
@@ -97,6 +100,9 @@ public struct SessionRow: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
+            if let editedAt = session.editedAt {
+                EditedMark(editedAt: editedAt)
+            }
         }
         .accessibilityHidden(true)
     }
@@ -151,6 +157,9 @@ public struct SessionRow: View {
         if let onAddAccomplishment {
             Button("Add accomplishment", action: onAddAccomplishment)
         }
+        if let onEditTimes {
+            Button("Correct times…", action: onEditTimes)
+        }
         Button("Copy outcome") { Pasteboard.copy(session.intendedOutcome) }
         if let summary = session.resultSummary, !summary.isEmpty {
             Button("Copy summary") { Pasteboard.copy(summary) }
@@ -173,11 +182,43 @@ public struct SessionRow: View {
             parts.append(DurationFormatting.compact(duration))
         }
         parts.append(session.resultStatus?.displayName ?? "Not reviewed")
+        if session.wasEdited { parts.append(EditedMark.spoken) }
         return parts.joined(separator: ", ")
     }
 }
 
 // MARK: - Shared row affordances
+
+/// The mark a session carries once its times were corrected by hand. See `FocusSession.editedAt`.
+///
+/// **Provenance, not a warning.** `.tertiary`, the ordinary pencil, no colour and no triangle; the
+/// date arrives on hover rather than taking a column of its own. Lggr's claim is that it is
+/// trustworthy evidence of your day, which means a number the user typed is never presented as one the
+/// app observed — the same honesty the timeline already applies to a gap it cannot explain. Nothing
+/// reads this as a fault and no total is discounted because of it.
+struct EditedMark: View {
+
+    let editedAt: Date
+
+    var body: some View {
+        Image(systemName: Icon.edit)
+            .imageScale(.small)
+            .foregroundStyle(.tertiary)
+            .help(Self.help(editedAt))
+            // The row combines its own children and speaks `spoken` as part of its sentence, so a
+            // second element here would say "edited" twice.
+            .accessibilityHidden(true)
+    }
+
+    /// The tooltip: what happened, and when. Not "you edited this".
+    static func help(_ editedAt: Date) -> String {
+        "Times corrected by hand on "
+            + editedAt.formatted(.dateTime.weekday(.wide).day().month(.wide))
+    }
+
+    /// What VoiceOver reads as part of a row's own sentence.
+    static let spoken = "times corrected by hand"
+}
 
 /// The trailing `⋯` button a row reveals on hover.
 ///

@@ -13,9 +13,13 @@ import Testing
 private func makeModel(
     store: InMemoryStore,
     at now: Date = Date(timeIntervalSinceReferenceDate: 727_100_000),
-    session: InboxSessionContext = .detached
+    // Optional rather than defaulted to `.detached`, for the reason `InboxModel.init` gives at its own
+    // `session` parameter: a default argument is evaluated in a nonisolated context and
+    // `InboxSessionContext` is main-actor isolated, so spelling `.detached` here is a warning today and
+    // an error in the Swift 6 language mode.
+    session: InboxSessionContext? = nil
 ) -> InboxModel {
-    InboxModel(store: store, clock: FixedClock(now), session: session)
+    InboxModel(store: store, clock: FixedClock(now), session: session ?? .detached)
 }
 
 @Suite("Interruption capture")

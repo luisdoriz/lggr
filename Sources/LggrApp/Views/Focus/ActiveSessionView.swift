@@ -9,8 +9,13 @@ import LggrKit
 // the visual hierarchy, and every other thing on the screen is quieter than this by design.
 //
 // So: the outcome is `Type.outcome` and never truncates; the timer is the hero; the project, the work
-// type and the two buttons are `Type.secondary` or smaller and sit at the edges. There is no metric
-// row, no badge, no status pill and no second colour.
+// type, the plan line and the buttons are `Type.secondary` or smaller and sit at the edges. There is
+// no metric row, no badge, no status pill and no second colour.
+//
+// The plan line — `Plan 50m  −10  +10  Set target ▾` — is the one row added since § 4.1 was written,
+// and it earns its place by fixing something the screen could not do: a session whose target turns
+// out to be wrong had to be finished and restarted, which broke the record in order to correct the
+// intent. It is deliberately the quietest thing in the card. See `planLine`.
 //
 // **Phase 3 belongs in Phase 3.** The live activity strip ("Xcode · 4 switches · 1 interruption"),
 // the context-switch count and the session timeline are all shown in § 4.1's wireframe and are all
@@ -39,6 +44,13 @@ public struct ActiveSessionView: View {
     private let now: () -> Date
     private let onTogglePause: () -> Void
     private let onFinish: () -> Void
+    private let onAdjustPlan: ((TimeInterval) -> Void)?
+    private let onSetPlan: ((TimeInterval?) -> Void)?
+    private let onDiscard: (() -> Void)?
+
+    /// Raised by `Discard`, from the button and from the context menu alike, so the confirmation is
+    /// written once and cannot say two different things.
+    @State private var isConfirmingDiscard = false
 
     /// - Parameters:
     ///   - session: The running or paused session.
@@ -47,18 +59,30 @@ public struct ActiveSessionView: View {
     ///     only view in this card that calls it, so nothing else here redraws once a second.
     ///   - onTogglePause: `SessionManager.togglePause`.
     ///   - onFinish: `SessionManager.finishSession`.
+    ///   - onAdjustPlan: `SessionManager.adjustPlannedDuration(by:)`, in seconds — the `+10` / `−10`
+    ///     controls. The *delta* is sent rather than a computed target because working out the target
+    ///     of an open-ended session needs the current instant, and reading the instant here would make
+    ///     this whole card redraw once a second (see `TimerDisplay`).
+    ///   - onSetPlan: `SessionManager.adjustPlannedDuration(to:)`. `nil` seconds means open-ended.
+    ///   - onDiscard: asks for the discard confirmation. `nil` removes the affordance entirely.
     public init(
         session: FocusSession,
         project: Project?,
         now: @escaping () -> Date,
         onTogglePause: @escaping () -> Void,
-        onFinish: @escaping () -> Void
+        onFinish: @escaping () -> Void,
+        onAdjustPlan: ((TimeInterval) -> Void)? = nil,
+        onSetPlan: ((TimeInterval?) -> Void)? = nil,
+        onDiscard: (() -> Void)? = nil
     ) {
         self.session = session
         self.project = project
         self.now = now
         self.onTogglePause = onTogglePause
         self.onFinish = onFinish
+        self.onAdjustPlan = onAdjustPlan
+        self.onSetPlan = onSetPlan
+        self.onDiscard = onDiscard
     }
 
     public var body: some View {
@@ -71,14 +95,26 @@ public struct ActiveSessionView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, Space.hero)
 
+                planLine
+
                 SessionControls(
                     isPaused: session.isPaused,
                     onTogglePause: onTogglePause,
-                    onFinish: onFinish
+                    onFinish: onFinish,
+                    onDiscard: onDiscard == nil ? nil : { isConfirmingDiscard = true }
                 )
             }
         }
         .contextMenu { cardContextMenu }
+        // § 3.3 reserves the alert for two things, and destructive confirmation is one of them. The
+        // sentence says what will be lost, in the same words the button used, and the confirm is the
+        // only red thing on the screen.
+        .alert("Discard this session?", isPresented: $isConfirmingDiscard) {
+            Button("Cancel", role: .cancel) {}
+            Button("Discard Session", role: .destructive) { onDiscard?() }
+        } message: {
+            Text("This session will not be recorded. The time it has run won't appear in Today, in your history or in the weekly review.")
+        }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Active session")
     }
@@ -128,6 +164,99 @@ public struct ActiveSessionView: View {
         !session.intendedOutcome.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    // MARK: - The target, mid-session
+
+    /// Ten minutes. The step every "just a bit longer" is actually made of, and small enough that
+    /// pressing it twice is a reasonable way to ask for twenty.
+    private static let planStep: TimeInterval = 10 * 60
+
+    /// Three targets and open-ended, which is the start panel's restraint applied to a session already
+    /// running (`04-screens.md` § 5.2). A menu of every multiple of five would be a settings screen.
+    private static let planTargetMinutes: [Int] = [25, 50, 90]
+
+    /// Revising the target while the session runs.
+    ///
+    /// **Quiet by construction, and it has to be:** the timer above is the dominant element on this
+    /// screen by design. So this is one `Type.secondary` line of borderless controls with no fill and
+    /// no border, left-aligned under a centred hero, carrying no keyboard shortcut of its own. Nothing
+    /// in it is a peer of the digits.
+    ///
+    /// Changing a target moves no recorded time, which is why none of this marks the session as edited
+    /// — see `FocusSession.adjustPlannedDuration(to:)`.
+    @ViewBuilder private var planLine: some View {
+        if onAdjustPlan != nil || onSetPlan != nil {
+            HStack(spacing: Space.s) {
+                Text(planText)
+                    .font(Type.secondary)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .accessibilityLabel("Planned duration")
+                    .accessibilityValue(planValue)
+
+                if let onAdjustPlan {
+                    planButton("−10", label: "Ten minutes less") {
+                        onAdjustPlan(-Self.planStep)
+                    }
+                    // An open-ended session has no target to take ten minutes off. `+10` still reads
+                    // as "ten minutes from here" and adopts the time already spent as its base.
+                    .disabled(session.isOpenEnded)
+
+                    planButton("+10", label: "Ten minutes more") {
+                        onAdjustPlan(Self.planStep)
+                    }
+                }
+
+                if let onSetPlan {
+                    planTargetMenu(onSetPlan)
+                }
+
+                Spacer(minLength: Space.s)
+            }
+            .padding(.bottom, Space.l)
+            .lggrAnimation(Motion.settle, value: session.plannedDuration)
+        }
+    }
+
+    private func planButton(
+        _ title: String,
+        label: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(title, action: action)
+            .buttonStyle(.borderless)
+            .font(Type.secondary)
+            .monospacedDigit()
+            .accessibilityLabel(label)
+    }
+
+    private func planTargetMenu(_ onSetPlan: @escaping (TimeInterval?) -> Void) -> some View {
+        Menu {
+            ForEach(Self.planTargetMinutes, id: \.self) { minutes in
+                Button("\(minutes) minutes") { onSetPlan(TimeInterval(minutes) * 60) }
+            }
+            Divider()
+            Button("Open-ended") { onSetPlan(nil) }
+        } label: {
+            Text("Set target")
+                .font(Type.secondary)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .accessibilityLabel("Set a target duration")
+    }
+
+    /// `Plan 50m` or `Open-ended`. The word "plan" rather than "target" because that is the word
+    /// `04-screens.md` § 10.4 already uses on the timer's own caption.
+    private var planText: String {
+        guard let planned = session.plannedDuration else { return "Open-ended" }
+        return "Plan " + DurationFormatting.compact(planned)
+    }
+
+    private var planValue: String {
+        guard let planned = session.plannedDuration else { return "Open-ended" }
+        return DurationFormatting.prose(planned)
+    }
+
     // MARK: - Context menu
 
     /// § 4.1 lists five items for this card. *Capture interruption* and *Change project* need Phase 3
@@ -139,6 +268,12 @@ public struct ActiveSessionView: View {
         Divider()
         Button(session.isPaused ? "Resume Session" : "Pause Session", action: onTogglePause)
         Button("Finish Session", action: onFinish)
+        if onDiscard != nil {
+            Divider()
+            // Confirms through the same alert the button raises. `role: .destructive` is what colours
+            // it, and it is the only red in this card.
+            Button("Discard Session", role: .destructive) { isConfirmingDiscard = true }
+        }
     }
 
     /// AppKit rather than SwiftUI: `.copyable(_:)` requires the view to hold keyboard focus and a

@@ -151,14 +151,20 @@ enum SnapshotMode {
             },
             Screen(name: "active-session") {
                 AnyView(
+                    // Wired the way the running app wires it, so the plan line and the discard
+                    // affordance are in the photograph. Handed `nil` they are absent, which is right in
+                    // a host that cannot perform them and useless in a review.
                     ActiveSessionView(
                         session: PreviewFixtures.runningSession,
                         project: PreviewFixtures.projects.first,
                         now: { PreviewFixtures.now },
                         onTogglePause: {},
-                        onFinish: {}
+                        onFinish: {},
+                        onAdjustPlan: { _ in },
+                        onSetPlan: { _ in },
+                        onDiscard: {}
                     )
-                    .frame(width: 900, height: 520)
+                    .frame(width: 900, height: 560)
                 )
             },
             Screen(name: "start-session") {
@@ -262,6 +268,35 @@ enum SnapshotMode {
                     .padding(24)
                 )
             },
+            // Correcting a finished session's times, in both of the states that matter: the sheet as it
+            // opens, and the sheet with the one thing it has to say before it writes.
+            Screen(name: "session-edit") {
+                AnyView(
+                    SessionEditSheet(
+                        session: HistorySnapshotFixtures.pausedSession,
+                        project: PreviewFixtures.projects.first,
+                        now: PreviewFixtures.now,
+                        onSave: { _, _ in }
+                    )
+                    .padding(24)
+                )
+            },
+            // Design decision B on screen: the span has been shortened below the pauses the session
+            // recorded, so the sheet states what saving would cost — inline, in `.secondary`, above the
+            // buttons, and never as an alert.
+            Screen(name: "session-edit-shrinks-pauses") {
+                AnyView(
+                    SessionEditSheet(
+                        session: HistorySnapshotFixtures.pausedSession,
+                        project: PreviewFixtures.projects.first,
+                        now: PreviewFixtures.now,
+                        draftEnd: HistorySnapshotFixtures.pausedSession.startedAt
+                            .addingTimeInterval(3 * 60),
+                        onSave: { _, _ in }
+                    )
+                    .padding(24)
+                )
+            },
             Screen(name: "rule-offer") {
                 AnyView(
                     ReclassifySheet(
@@ -311,7 +346,7 @@ enum SnapshotMode {
                         interruptions: HistorySnapshotFixtures.detailInterruptions,
                         accomplishments: HistorySnapshotFixtures.detailAccomplishments,
                         projects: PreviewFixtures.projects,
-                        actions: SessionDetailActions(save: { _ in })
+                        actions: SessionDetailActions(save: { _ in }, editTimes: {})
                     )
                     .frame(width: 900, height: 1_320)
                 )
@@ -588,6 +623,23 @@ enum HistorySnapshotFixtures {
 
     // MARK: Sessions
 
+    /// A finished session with real pauses inside it: 10:05–10:40 with five minutes paused, so thirty
+    /// minutes of active time.
+    ///
+    /// The subject of the edit sheet's two snapshots, because the pauses are what make design decision
+    /// B visible — shorten this span below five minutes and the sheet has something to warn about.
+    static let pausedSession = FocusSession(
+        id: PreviewFixtures.fixtureID(330),
+        projectID: PreviewFixtures.receiptIngestionID,
+        intendedOutcome: "Review the ingest retry PR",
+        workType: .codeReview,
+        plannedDuration: 30 * 60,
+        startedAt: PreviewFixtures.time(10, 5),
+        endedAt: PreviewFixtures.time(10, 40),
+        pausedDuration: 5 * 60,
+        resultStatus: .madeProgress
+    )
+
     /// Today's declared work plus two earlier days, so the list has three day groups to head.
     static let sessions: [FocusSession] = {
         var all = PreviewFixtures.finishedSessions
@@ -667,6 +719,10 @@ enum HistorySnapshotFixtures {
             interruptionCount: 1
         )
         session.blocker = "The backfill needs a maintenance window nobody has booked yet"
+        // Corrected by hand an hour after it ran — the ordinary "I forgot to press stop" repair. It is
+        // here so the quiet provenance line design decision A asks for is in a photograph, and so a
+        // reviewer can check that it reads as a fact about the record rather than as a warning.
+        session.editedAt = PreviewFixtures.time(10, 55)
         return session
     }()
 

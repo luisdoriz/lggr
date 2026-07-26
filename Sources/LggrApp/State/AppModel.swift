@@ -34,6 +34,12 @@ public final class AppModel {
         /// The accomplishment editor, opened from an inbox row that is turning into one. Separate
         /// from `addAccomplishment` because saving it also has to settle the interruption.
         case interruptionAccomplishment(interruptionID: UUID)
+        /// "Correct the times" for a finished session.
+        ///
+        /// Carries the id rather than the record, like every other route here: the sheet can be opened
+        /// from Today, from the history and from a pushed detail, and the host resolves the id against
+        /// whichever of those is currently loaded.
+        case editSession(sessionID: UUID)
 
         public var id: String {
             switch self {
@@ -43,6 +49,7 @@ public final class AppModel {
             case .projectEditor(let projectID): "projectEditor-\(projectID?.uuidString ?? "new")"
             case .captureInterruption: "captureInterruption"
             case .interruptionAccomplishment(let id): "interruptionAccomplishment-\(id.uuidString)"
+            case .editSession(let id): "editSession-\(id.uuidString)"
             }
         }
     }
@@ -163,6 +170,11 @@ public final class AppModel {
 
     public func presentProjectEditor(projectID: UUID? = nil) {
         present(.projectEditor(projectID: projectID))
+    }
+
+    /// "Correct the times" for a finished session.
+    public func presentSessionEditor(sessionID: UUID) {
+        present(.editSession(sessionID: sessionID))
     }
 
     /// Interruption capture. From the menu bar it replaces the popover's contents; from anywhere else

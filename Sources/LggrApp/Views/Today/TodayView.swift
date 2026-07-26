@@ -23,9 +23,9 @@ import SwiftUI
 
 /// What Today can do. Every one of these is wired by the host; the view itself owns no behaviour.
 ///
-/// The two `delete` handlers are optional because deletion is not part of the `SessionManager`
-/// contract in Phase 2. When a handler is absent the menu item is absent too — a menu that offers an
-/// action it cannot perform is worse than one that does not offer it.
+/// The optional handlers are optional because not every host can perform them: the accomplishment
+/// delete has no method behind it yet. When a handler is absent the menu item is absent too — a menu
+/// that offers an action it cannot perform is worse than one that does not offer it.
 public struct TodayActions {
     public var startSession: () -> Void
     public var addAccomplishment: () -> Void
@@ -35,6 +35,9 @@ public struct TodayActions {
     /// Opens the interruption inbox. Processing happens there, not here: Today's job is to say that
     /// something is waiting, in one line, and then get out of the way.
     public var reviewInbox: () -> Void
+    /// Opens `SessionEditSheet` for a finished session whose recorded times are wrong — the "I forgot
+    /// to press stop" repair, offered where the wrong number is being read.
+    public var editSessionTimes: ((FocusSession) -> Void)?
     public var deleteSession: ((FocusSession) -> Void)?
     public var deleteAccomplishment: ((Accomplishment) -> Void)?
 
@@ -45,6 +48,7 @@ public struct TodayActions {
         logAccomplishment: @escaping (FocusSession) -> Void = { _ in },
         editAccomplishment: @escaping (Accomplishment) -> Void = { _ in },
         reviewInbox: @escaping () -> Void = {},
+        editSessionTimes: ((FocusSession) -> Void)? = nil,
         deleteSession: ((FocusSession) -> Void)? = nil,
         deleteAccomplishment: ((Accomplishment) -> Void)? = nil
     ) {
@@ -54,6 +58,7 @@ public struct TodayActions {
         self.logAccomplishment = logAccomplishment
         self.editAccomplishment = editAccomplishment
         self.reviewInbox = reviewInbox
+        self.editSessionTimes = editSessionTimes
         self.deleteSession = deleteSession
         self.deleteAccomplishment = deleteAccomplishment
     }
@@ -198,6 +203,7 @@ public struct TodayView<SessionCard: View>: View {
                         project: project(for: session.projectID),
                         onReview: { actions.reviewSession(session) },
                         onAddAccomplishment: { actions.logAccomplishment(session) },
+                        onEditTimes: editTimesAction(for: session),
                         onDelete: deleteAction(for: session)
                     )
                 }
@@ -348,6 +354,11 @@ public struct TodayView<SessionCard: View>: View {
     // spelled out once instead of inferred at four call sites.
     private func deleteAction(for session: FocusSession) -> (() -> Void)? {
         guard let handler = actions.deleteSession else { return nil }
+        return { handler(session) }
+    }
+
+    private func editTimesAction(for session: FocusSession) -> (() -> Void)? {
+        guard let handler = actions.editSessionTimes else { return nil }
         return { handler(session) }
     }
 

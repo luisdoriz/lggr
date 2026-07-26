@@ -166,7 +166,7 @@ public struct AppCommands: Commands {
         case .sessionReview:
             return "Save Review"
         case .addAccomplishment, .projectEditor, .captureInterruption,
-            .interruptionAccomplishment:
+            .interruptionAccomplishment, .editSession:
             // Each carries its own Save; the title stays on the action the menu would perform once
             // the panel closes.
             return "Finish Session"
