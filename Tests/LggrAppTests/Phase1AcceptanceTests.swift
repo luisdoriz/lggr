@@ -291,6 +291,16 @@ struct Criterion3Tests {
 @Suite("Phase 1 acceptance — criterion 4: nothing is recorded for another user's hour", .serialized)
 @MainActor
 struct Criterion4Tests {
+    /// The application these tests pretend is in front.
+    ///
+    /// Declared rather than read from `NSWorkspace`: a CI runner has no logged-in graphical session,
+    /// so there is no frontmost application at all and the sampler correctly records nothing. Asking
+    /// the machine made these tests pass on a desk and fail on every runner.
+    static let stubFrontmost = FrontmostApplication(
+        bundleIdentifier: "com.example.editor",
+        displayName: "Editor"
+    )
+
 
     /// Lets the notification centre's main-queue delivery actually happen.
     private func settle() async {
@@ -325,6 +335,7 @@ struct Criterion4Tests {
             // A normal machine: user present, screen on. Without this the suite reads the
             // developer's real console state and fails whenever their screen is locked.
             sessionState: { .active },
+            frontmostApplication: { Self.stubFrontmost },
             onFlush: { batches in recorded.append(batches) }
         )
 
@@ -419,6 +430,7 @@ struct Criterion4Tests {
             // A normal machine: user present, screen on. Without this the suite reads the
             // developer's real console state and fails whenever their screen is locked.
             sessionState: { .active },
+            frontmostApplication: { Self.stubFrontmost },
             onFlush: { batches in recorded.append(batches) }
         )
 
@@ -471,6 +483,7 @@ struct Criterion4Tests {
             // A normal machine: user present, screen on. Without this the suite reads the
             // developer's real console state and fails whenever their screen is locked.
             sessionState: { .active },
+            frontmostApplication: { Self.stubFrontmost },
             onFlush: { batches in recorded.append(batches) }
         )
 
@@ -540,6 +553,16 @@ private final class Recorder {
 @Suite("Phase 1 — the quiet failure modes", .serialized)
 @MainActor
 struct Phase1QuietFailureTests {
+    /// The application these tests pretend is in front.
+    ///
+    /// Declared rather than read from `NSWorkspace`: a CI runner has no logged-in graphical session,
+    /// so there is no frontmost application at all and the sampler correctly records nothing. Asking
+    /// the machine made these tests pass on a desk and fail on every runner.
+    static let stubFrontmost = FrontmostApplication(
+        bundleIdentifier: "com.example.editor",
+        displayName: "Editor"
+    )
+
 
     private func settle() async {
         for _ in 0..<10 {
@@ -553,7 +576,7 @@ struct Phase1QuietFailureTests {
     /// file, and every reader downstream is then trusted to remember to hide it.
     @Test("A private application is redacted before the interval leaves the sampler")
     func privateApplicationsAreRedactedAtCapture() async throws {
-        let frontmost = try #require(NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
+        let frontmost = Self.stubFrontmost.bundleIdentifier
 
         let clock = FixedClock(at(10, 0))
         let heartbeatURL = FileManager.default.temporaryDirectory
@@ -577,6 +600,7 @@ struct Phase1QuietFailureTests {
             // A normal machine: user present, screen on. Without this the suite reads the
             // developer's real console state and fails whenever their screen is locked.
             sessionState: { .active },
+            frontmostApplication: { Self.stubFrontmost },
             onFlush: { batches in recorded.append(batches) }
         )
 
@@ -606,7 +630,7 @@ struct Phase1QuietFailureTests {
     /// silently drop the span: it becomes a typed absence.
     @Test("An excluded application becomes a typed gap, not a silent hole")
     func excludedApplicationsBecomeGaps() async throws {
-        let frontmost = try #require(NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
+        let frontmost = Self.stubFrontmost.bundleIdentifier
 
         let clock = FixedClock(at(10, 0))
         let heartbeatURL = FileManager.default.temporaryDirectory
@@ -630,6 +654,7 @@ struct Phase1QuietFailureTests {
             // A normal machine: user present, screen on. Without this the suite reads the
             // developer's real console state and fails whenever their screen is locked.
             sessionState: { .active },
+            frontmostApplication: { Self.stubFrontmost },
             onFlush: { batches in recorded.append(batches) }
         )
 

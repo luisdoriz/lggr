@@ -280,6 +280,11 @@ public final class ActivitySampler {
     /// about the real machine*: a test running while the developer's screen happens to be locked
     /// would otherwise watch the sampler correctly suspend itself and call that a failure.
     private let sessionState: @Sendable () -> SystemSessionState.Snapshot
+    /// Which application is in front. Injectable for the same reason `sessionState` is: it is a fact
+    /// about the real machine. A CI runner has no logged-in graphical session and therefore no
+    /// frontmost application at all, so a test that drives the sampler and expects an interval passes
+    /// on a developer's desk and fails on every runner.
+    private let frontmostApplication: @MainActor () -> FrontmostApplication?
 
     // MARK: - Init
 
@@ -298,6 +303,9 @@ public final class ActivitySampler {
         sessionState: @escaping @Sendable () -> SystemSessionState.Snapshot = {
             SystemSessionState.snapshot
         },
+        frontmostApplication: @escaping @MainActor () -> FrontmostApplication? = {
+            FrontmostApplication.current
+        },
         onFlush: @escaping ActivityFlushHandler
     ) {
         self.configuration = configuration
@@ -305,6 +313,7 @@ public final class ActivitySampler {
         self.workspaceCenter = workspaceCenter
         self.distributedCenter = distributedCenter
         self.sessionState = sessionState
+        self.frontmostApplication = frontmostApplication
         self.heartbeat = heartbeat
         self.idleMonitor =
             idleMonitor ?? IdleMonitor(threshold: configuration.idleThreshold, clock: clock)
@@ -736,9 +745,7 @@ public final class ActivitySampler {
         guard isRecording else { return }
         let observed = now ?? start
 
-        guard let application = NSWorkspace.shared.frontmostApplication,
-            let bundleIdentifier = application.bundleIdentifier
-        else {
+        guard let application = frontmostApplication() else {
             // Nothing frontmost, or a process with no bundle identifier: the login window, a modal
             // system panel, a helper. It cannot be keyed, named later or excluded by the user, so
             // recording it would put an unfalsifiable row on the timeline. The time still has to go
@@ -749,19 +756,16 @@ public final class ActivitySampler {
             return
         }
 
-        if configuration.excludedApplications.contains(bundleIdentifier) {
+        if configuration.excludedApplications.contains(application.bundleIdentifier) {
             closeInterval(at: start, asOf: observed)
             openGap(.excludedApplication, at: start)
             updateState()
             return
         }
 
-        let isPrivate = configuration.privateApplications.contains(bundleIdentifier)
-        let recordedBundle = isPrivate ? Self.privateBundleIdentifier : bundleIdentifier
-        let recordedName =
-            isPrivate
-            ? Self.privateDisplayName
-            : (application.localizedName ?? bundleIdentifier)
+        let isPrivate = configuration.privateApplications.contains(application.bundleIdentifier)
+        let recordedBundle = isPrivate ? Self.privateBundleIdentifier : application.bundleIdentifier
+        let recordedName = isPrivate ? Self.privateDisplayName : application.displayName
 
         if !forcingNewInterval, let open = openInterval, open.bundleIdentifier == recordedBundle {
             // Same application still in front: the run continues. An activation notification for the
