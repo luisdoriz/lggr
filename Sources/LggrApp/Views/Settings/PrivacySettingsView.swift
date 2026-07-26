@@ -241,20 +241,29 @@ public struct PrivacySettingsView: View {
             }
 
             if !model.recordedDays.isEmpty {
-                HStack(spacing: Space.m) {
-                    Picker("Delete one day", selection: $selectedDay) {
-                        Text("Choose a day").tag(ActivityDayKey?.none)
-                        ForEach(model.recordedDays.reversed(), id: \.rawValue) { day in
-                            Text(Self.dayTitle(day)).tag(ActivityDayKey?.some(day))
+                // `LabeledContent`, not a bare `HStack`. Inside a `Form`, a labelled `Picker` takes
+                // the platform's row layout and expands to fill the row, so a sibling `Button` in an
+                // `HStack` is pushed past the trailing edge and the whole pane widens past the window.
+                // `LabeledContent` is the idiom for one label owning several trailing controls;
+                // `.labelsHidden()` stops the picker drawing a second label while keeping it for
+                // VoiceOver.
+                LabeledContent("Delete one day") {
+                    HStack(spacing: Space.m) {
+                        Picker("Delete one day", selection: $selectedDay) {
+                            Text("Choose a day").tag(ActivityDayKey?.none)
+                            ForEach(model.recordedDays.reversed(), id: \.rawValue) { day in
+                                Text(Self.dayTitle(day)).tag(ActivityDayKey?.some(day))
+                            }
                         }
-                    }
+                        .labelsHidden()
 
-                    Button("Delete") {
-                        guard let selectedDay else { return }
-                        pending = .day(selectedDay)
+                        Button("Delete") {
+                            guard let selectedDay else { return }
+                            pending = .day(selectedDay)
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(selectedDay == nil || model.isWorking)
                     }
-                    .buttonStyle(.borderless)
-                    .disabled(selectedDay == nil || model.isWorking)
                 }
             }
 

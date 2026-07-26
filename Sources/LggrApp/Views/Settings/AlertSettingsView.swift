@@ -147,23 +147,17 @@ public struct AlertSettingsView: View {
         switch kind {
         case .unlabelledBlock:
             VStack(alignment: .leading, spacing: Space.xxs) {
-                // Side by side when there is room, stacked when there is not.
+                // One row each, never side by side.
                 //
-                // Two `.fixedSize()` pickers in a plain `HStack` cannot compress, and that minimum
-                // propagates all the way up: the whole pane inherited a width larger than a narrow
-                // Settings window, so every row was clipped on both edges — the heading read "ons"
-                // rather than "Notifications". `ViewThatFits` drops the hard minimum by having a
-                // second layout to fall back to.
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: Space.s) {
-                        startHourPicker
-                        endHourPicker
-                    }
-                    VStack(alignment: .leading, spacing: Space.xxs) {
-                        startHourPicker
-                        endHourPicker
-                    }
-                }
+                // Inside a `Form`, a labelled `Picker` takes the platform's row layout: label on the
+                // leading edge, control trailing, expanding to fill the row. Two of them in an
+                // `HStack` therefore ask for two full rows' width, the pane grows wider than the
+                // window, and every row is pushed left and clipped — the labels read "nished" and
+                // "rough a session", and the second picker fell off the trailing edge. `.fixedSize()`
+                // does not prevent it and neither does `ViewThatFits`, because each picker fits; it
+                // is the pair that does not.
+                startHourPicker
+                endHourPicker
 
                 Text(hoursNote)
                     .font(Type.caption)
@@ -206,7 +200,7 @@ public struct AlertSettingsView: View {
 
     private var startHourPicker: some View {
         hourPicker(
-            "Between",
+            "Offer between",
             selection: Binding(
                 get: { preferences.promptSchedule.hours.startHour },
                 set: { setHours(startHour: $0) }
@@ -216,7 +210,7 @@ public struct AlertSettingsView: View {
 
     private var endHourPicker: some View {
         hourPicker(
-            "and",
+            "and before",
             selection: Binding(
                 get: { preferences.promptSchedule.hours.endHour },
                 set: { setHours(endHour: $0) }
