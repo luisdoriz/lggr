@@ -71,7 +71,7 @@ public struct PrivacySettingsView: View {
                     .padding(.top, Space.xl)
             }
 
-            Form {
+            SettingsForm {
                 trackingSection
                 privateSection
                 excludedSection
@@ -79,7 +79,6 @@ public struct PrivacySettingsView: View {
                 recordSection
                 noticeSection
             }
-            .formStyle(.grouped)
             .frame(width: host == .window ? privacyPaneWidth : nil)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)

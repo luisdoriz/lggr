@@ -82,7 +82,7 @@ public struct AlertSettingsView: View {
     }
 
     public var body: some View {
-        Form {
+        SettingsForm {
             Section("Notifications") {
                 ForEach(NotificationSwitches.switchableKinds, id: \.self) { kind in
                     row(for: kind)
@@ -93,7 +93,6 @@ public struct AlertSettingsView: View {
                 systemStatus
             }
         }
-        .formStyle(.grouped)
         .frame(width: Layout.reviewSheetWidth)
         .background(Surface.canvas)
         .accessibilityElement(children: .contain)

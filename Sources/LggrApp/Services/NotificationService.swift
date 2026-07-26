@@ -108,7 +108,11 @@ public enum NotificationKind: String, CaseIterable, Sendable, Hashable {
         case .halfway: "Halfway through a session"
         case .longIdle: "No input during a session"
         case .endOfDayReview: "End-of-day review"
-        case .unlabelledBlock: "A long stretch with no session"
+        // Named for what the user is doing, not for what is absent. The other four name an event —
+        // "Session finished", "No input during a session" — and this one used to read "A long stretch
+        // with no session": the only noun phrase in the list, the only one starting with an article,
+        // and it never said that Lggr would ask what you were working on.
+        case .unlabelledBlock: "Working without a session"
         }
     }
 
@@ -124,8 +128,8 @@ public enum NotificationKind: String, CaseIterable, Sendable, Hashable {
             "Sent at the time you choose, and only if the day holds blocks with nothing declared "
                 + "for them. A day with nothing unlabelled sends nothing."
         case .unlabelledBlock:
-            "Sent once when you have been working for a while with no session running, with the "
-                + "option to label that stretch from the notification."
+            "Sent once when you have been working a while with nothing running, asking what you "
+                + "are working on. Answering it labels the time you already spent."
         }
     }
 }

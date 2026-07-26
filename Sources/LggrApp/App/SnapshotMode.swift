@@ -200,6 +200,33 @@ enum SnapshotMode {
                     .padding(24)
                 )
             },
+            Screen(name: "settings-alerts") {
+                AnyView(
+                    AlertSettingsView(
+                        gate: SettingsSnapshotFixtures.allowedGate,
+                        preferences: SettingsSnapshotFixtures.preferences
+                    )
+                    .frame(width: 620, height: 900, alignment: .top)
+                    .background(Surface.canvas)
+                )
+            },
+            Screen(name: "settings-alerts-not-asked") {
+                AnyView(
+                    AlertSettingsView(
+                        gate: SettingsSnapshotFixtures.notAskedGate,
+                        preferences: SettingsSnapshotFixtures.preferences
+                    )
+                    .frame(width: 620, height: 900, alignment: .top)
+                    .background(Surface.canvas)
+                )
+            },
+            Screen(name: "settings-privacy") {
+                AnyView(
+                    PrivacySettingsView(model: SettingsSnapshotFixtures.privacy)
+                    .frame(width: 620, height: 1000, alignment: .top)
+                    .background(Surface.canvas)
+                )
+            },
             Screen(name: "menubar-idle") {
                 AnyView(
                     MenuBarIdleView(
@@ -1293,6 +1320,25 @@ enum SettingsSnapshotFixtures {
 
     /// A real-looking location, written out rather than read off this machine, so the pane is
     /// photographed at the path length it will actually have to fit.
+    /// Authorization already granted, with every kind switched on — the state the pane spends its
+    /// life in, and the one that shows every row's copy at once.
+    static let allowedGate = NotificationGate(
+        service: RecordingNotificationService(authorization: .allowed),
+        switches: NotificationSwitches(
+            sessionCompleted: true,
+            halfway: true,
+            longIdle: true,
+            endOfDayReview: true,
+            unlabelledBlock: true
+        )
+    )
+
+    /// Nothing asked for yet, which is what a new user opens. This is the state the pane had never
+    /// been photographed in.
+    static let notAskedGate = NotificationGate(
+        service: RecordingNotificationService(authorization: .notRequested)
+    )
+
     static let storage = StorageSummary(
         backendName: "JSON files",
         folderURL: URL(

@@ -50,7 +50,7 @@ public struct ShortcutSettingsView: View {
     }
 
     public var body: some View {
-        Form {
+        SettingsForm {
             Section("Global shortcuts") {
                 ForEach(GlobalShortcutAction.allCases, id: \.self) { action in
                     row(for: action)
@@ -67,7 +67,6 @@ public struct ShortcutSettingsView: View {
                 .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .formStyle(.grouped)
         .frame(width: Layout.reviewSheetWidth)
         .background(Surface.canvas)
         .accessibilityElement(children: .contain)
