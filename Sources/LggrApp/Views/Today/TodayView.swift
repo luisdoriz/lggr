@@ -40,6 +40,15 @@ public struct TodayActions {
     public var editSessionTimes: ((FocusSession) -> Void)?
     public var deleteSession: ((FocusSession) -> Void)?
     public var deleteAccomplishment: ((Accomplishment) -> Void)?
+    /// Opens `LabelBlockSheet` for a block nobody declared anything over — the Phase 2 gesture that
+    /// makes a reconstructed block a real session with its measured times.
+    public var labelBlock: ((Episode) -> Void)?
+    /// Opens `EndOfDayReviewSheet` — the whole day's unlabelled blocks as one queue.
+    ///
+    /// Present here as well as on the notification because the notification is optional and this is
+    /// not: batch is what makes labelling survivable, and a user who declined notifications must still
+    /// have a way to it.
+    public var reviewUnlabelled: (() -> Void)?
 
     public init(
         startSession: @escaping () -> Void = {},
@@ -50,7 +59,9 @@ public struct TodayActions {
         reviewInbox: @escaping () -> Void = {},
         editSessionTimes: ((FocusSession) -> Void)? = nil,
         deleteSession: ((FocusSession) -> Void)? = nil,
-        deleteAccomplishment: ((Accomplishment) -> Void)? = nil
+        deleteAccomplishment: ((Accomplishment) -> Void)? = nil,
+        labelBlock: ((Episode) -> Void)? = nil,
+        reviewUnlabelled: (() -> Void)? = nil
     ) {
         self.startSession = startSession
         self.addAccomplishment = addAccomplishment
@@ -61,6 +72,8 @@ public struct TodayActions {
         self.editSessionTimes = editSessionTimes
         self.deleteSession = deleteSession
         self.deleteAccomplishment = deleteAccomplishment
+        self.labelBlock = labelBlock
+        self.reviewUnlabelled = reviewUnlabelled
     }
 }
 
@@ -253,7 +266,11 @@ public struct TodayView<SessionCard: View>: View {
     /// almost always false — the usual reason for an empty timeline is that capture has not run yet.
     @ViewBuilder private var daySection: some View {
         if let timeline, !timeline.isEmpty {
-            DayTimelineStrip(timeline: timeline)
+            DayTimelineStrip(
+                timeline: timeline,
+                onLabelBlock: actions.labelBlock,
+                onReviewUnlabelled: actions.reviewUnlabelled
+            )
         }
     }
 

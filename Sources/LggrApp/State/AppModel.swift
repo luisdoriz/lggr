@@ -40,6 +40,20 @@ public final class AppModel {
         /// from Today, from the history and from a pushed detail, and the host resolves the id against
         /// whichever of those is currently loaded.
         case editSession(sessionID: UUID)
+        /// "This was…" for a block the timeline reconstructed.
+        ///
+        /// Carries the block's identifier rather than the `Episode`, like every other route here.
+        /// `EpisodeBuilder` derives an episode's id from its own bounds, so the id survives the
+        /// rebuild that every flush of the sampler performs — and if the segmentation genuinely
+        /// changed, the id no longer resolves and the sheet closes itself rather than labelling a
+        /// block that is no longer on screen.
+        case labelBlock(episodeID: UUID)
+        /// "Today's record" — the queue of blocks nobody declared anything over.
+        ///
+        /// Carries nothing at all, deliberately: the queue is recomputed from the timeline at the
+        /// moment the sheet renders. A route carrying a list of blocks would be a snapshot of the day
+        /// taken when a notification was posted, and the user may have declared two of them since.
+        case endOfDayReview
 
         public var id: String {
             switch self {
@@ -50,6 +64,8 @@ public final class AppModel {
             case .captureInterruption: "captureInterruption"
             case .interruptionAccomplishment(let id): "interruptionAccomplishment-\(id.uuidString)"
             case .editSession(let id): "editSession-\(id.uuidString)"
+            case .labelBlock(let id): "labelBlock-\(id.uuidString)"
+            case .endOfDayReview: "endOfDayReview"
             }
         }
     }
@@ -175,6 +191,27 @@ public final class AppModel {
     /// "Correct the times" for a finished session.
     public func presentSessionEditor(sessionID: UUID) {
         present(.editSession(sessionID: sessionID))
+    }
+
+    /// "This was…" for a reconstructed block.
+    ///
+    /// A sheet on the main window even when it was invoked from the menu bar, unlike the start panel
+    /// and interruption capture. Those two collect something about *now* and must not cost a window;
+    /// this one is a statement about a block on the timeline, and the timeline is the evidence the
+    /// user needs in front of them to make it. Selecting Today first is what puts it there.
+    public func presentBlockLabel(episodeID: UUID) {
+        section = .today
+        present(.labelBlock(episodeID: episodeID))
+    }
+
+    /// "Today's record" — the end-of-day queue, opened from its notification or from Today.
+    ///
+    /// Today first, for the same reason `presentBlockLabel` selects it: the queue is a statement about
+    /// blocks on the timeline, and closing the sheet should leave the user looking at the evidence
+    /// rather than at whatever screen they were last on.
+    public func presentEndOfDayReview() {
+        section = .today
+        present(.endOfDayReview)
     }
 
     /// Interruption capture. From the menu bar it replaces the popover's contents; from anywhere else

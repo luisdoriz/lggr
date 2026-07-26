@@ -100,6 +100,12 @@ public struct SessionRow: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
+            if let reconstructedAt = session.reconstructedAt {
+                ReconstructedMark(reconstructedAt: reconstructedAt)
+            }
+            if let autoClosedAt = session.autoClosedAt {
+                AutoClosedMark(autoClosedAt: autoClosedAt, reason: session.autoCloseReason)
+            }
             if let editedAt = session.editedAt {
                 EditedMark(editedAt: editedAt)
             }
@@ -182,6 +188,8 @@ public struct SessionRow: View {
             parts.append(DurationFormatting.compact(duration))
         }
         parts.append(session.resultStatus?.displayName ?? "Not reviewed")
+        if session.wasReconstructed { parts.append(ReconstructedMark.spoken) }
+        if session.wasAutoClosed { parts.append(AutoClosedMark.spoken) }
         if session.wasEdited { parts.append(EditedMark.spoken) }
         return parts.joined(separator: ", ")
     }
@@ -218,6 +226,84 @@ struct EditedMark: View {
 
     /// What VoiceOver reads as part of a row's own sentence.
     static let spoken = "times corrected by hand"
+}
+
+/// The mark a session carries because it was labelled from a block Lggr had already measured. See
+/// `FocusSession.reconstructedAt`.
+///
+/// **It never goes away.** `INTELLIGENCE.md` §4 Phase 2 requires reconstructed sessions to render
+/// distinctly *forever*, not just on the day, and its acceptance criterion 1 is that the distinction
+/// is still legible a month later. Reconstruction that faded from the record would let a week of
+/// catch-up labelling read exactly like a week of declared work, which is the one analysis this
+/// product exists to produce.
+///
+/// Provenance, not a warning, and drawn to the same rules as `EditedMark`: `.tertiary`, an ordinary
+/// glyph, no colour and no triangle, with the date on hover rather than in a column of its own.
+/// Nothing reads this as a fault and no total is discounted because of it — a reconstructed hour is an
+/// hour.
+struct ReconstructedMark: View {
+
+    let reconstructedAt: Date
+
+    var body: some View {
+        Image(systemName: Icon.labelBlock)
+            .imageScale(.small)
+            .foregroundStyle(.tertiary)
+            .help(Self.help(reconstructedAt))
+            // The row combines its own children and speaks `spoken` as part of its sentence, so a
+            // second element here would say it twice.
+            .accessibilityHidden(true)
+    }
+
+    /// The tooltip: what happened, and when. A fact about the record — not "you forgot to press start".
+    static func help(_ reconstructedAt: Date) -> String {
+        "Labelled from time Lggr measured, on "
+            + reconstructedAt.formatted(.dateTime.weekday(.wide).day().month(.wide))
+    }
+
+    /// What VoiceOver reads as part of a row's own sentence.
+    static let spoken = "labelled from measured time"
+}
+
+/// The mark a session carries because **Lggr** decided where it ended. See
+/// `FocusSession.autoClosedAt` and `SessionAutoCloseReason`.
+///
+/// Its own mark rather than `EditedMark`'s, because the two say opposite things about authorship:
+/// `editedAt` means *the user typed this number*, `autoClosedAt` means *the app chose it, and can name
+/// the witness it chose it from*. A session can carry both — the app closed it at the last heartbeat
+/// and the user then corrected that — and the pair reads correctly as two facts.
+///
+/// Drawn to the same rules as `EditedMark` and `ReconstructedMark`: `.tertiary`, the reason's own
+/// ordinary glyph, no colour and no triangle, with the witness and the date on hover. An app-adjusted
+/// time presented as an observed one is the confidently wrong record the whole design avoids, so the
+/// distinction stays on the record forever rather than living only in the notification that announced
+/// it — which is off by default and which the user may never have seen.
+struct AutoClosedMark: View {
+
+    let autoClosedAt: Date
+    /// `nil` only for a record written before the reason was stored beside the instant.
+    let reason: SessionAutoCloseReason?
+
+    var body: some View {
+        Image(systemName: reason?.symbolName ?? Icon.autoClosed)
+            .imageScale(.small)
+            .foregroundStyle(.tertiary)
+            .help(Self.help(autoClosedAt, reason: reason))
+            // The row combines its own children and speaks `spoken` as part of its sentence, so a
+            // second element here would say it twice.
+            .accessibilityHidden(true)
+    }
+
+    /// The tooltip: which witness the end came from, and when the app decided it. A fact about the
+    /// record — never "you left this running".
+    static func help(_ autoClosedAt: Date, reason: SessionAutoCloseReason?) -> String {
+        let when = autoClosedAt.formatted(.dateTime.weekday(.wide).day().month(.wide))
+        guard let reason else { return "Ended by Lggr on \(when)" }
+        return "\(reason.displayName), decided by Lggr on \(when)"
+    }
+
+    /// What VoiceOver reads as part of a row's own sentence.
+    static let spoken = "ended by Lggr"
 }
 
 /// The trailing `⋯` button a row reveals on hover.

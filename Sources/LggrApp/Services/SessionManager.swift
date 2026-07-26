@@ -46,6 +46,22 @@ public final class SessionManager {
     /// The last store failure, as one sentence, surfaced as a dismissible banner.
     public private(set) var lastError: String?
 
+    /// The session Lggr closed on the user's behalf, and why — set the moment it happens, and
+    /// cleared when the user acknowledges it.
+    ///
+    /// Published rather than applied silently. A time the app chose must be visible as one, or the
+    /// correction is indistinguishable from the defect it fixes: both change a number the user was
+    /// not watching.
+    public private(set) var autoCloseNotice: AutoCloseNotice?
+
+    /// A session whose end Lggr decided, with the sentence that explains it.
+    public struct AutoCloseNotice: Equatable, Sendable {
+        public let session: FocusSession
+        public let decision: SessionAutoClose.Decision
+        /// "Ended at 12:04, the last input Lggr recorded."
+        public let sentence: String
+    }
+
     /// The instant the interface should render against. Assigned once a second while a session is
     /// running, and once more on wake, on pause and on resume. Nothing else writes it, and it is
     /// deliberately *not* the source of any duration.
@@ -70,18 +86,76 @@ public final class SessionManager {
     /// but not how often, and the generated summary wants the count.
     @ObservationIgnored private var pauseCounts: [UUID: Int] = [:]
 
+    // MARK: - Closing a session the user forgot about
+
+    /// Where notifications go. `nil` in the gallery, the snapshot renderer and any test that does not
+    /// care — and every scheduling call below tolerates that, because a notification is never the
+    /// mechanism by which anything happens.
+    @ObservationIgnored private let notifications: NotificationGate?
+
+    /// How long since human input reached this machine.
+    ///
+    /// The same reading `IdleMonitor` takes, taken directly rather than through it: this object needs
+    /// the number at the moment it evaluates a decision, and routing it through a second timer would
+    /// be a third timer in a subsystem that is allowed two (`IdleMonitor`'s documentation, criterion
+    /// 8). Injectable because it is ground truth about the real machine — a test that expects a
+    /// forgotten session to close cannot depend on the developer's own idle timer.
+    @ObservationIgnored private let idleSeconds: @Sendable () -> TimeInterval
+
+    /// The last instant the *previous* run of Lggr is known to have been alive, or `nil` when nothing
+    /// is known.
+    ///
+    /// Read once, at bootstrap, and expected to be `ActivityHeartbeat.readLastBeatFromDisk()` — the
+    /// same forty bytes `ActivityLaunchRecovery` computes the timeline's `.appNotRunning` gap from. It
+    /// is deliberately the same source rather than a second one: a session's end and the gap beside
+    /// it disagreeing by a minute would make the record contradict itself, which is worse than either
+    /// number being slightly conservative.
+    @ObservationIgnored private let lastHeartbeat: @MainActor () -> Date?
+
+    /// When the machine went to sleep, if it is asleep or has just woken.
+    ///
+    /// `SleepWakeObserver` already tells this object about sleep; recording the instant is what turns
+    /// that into a witness. A session running when the lid closes is closed here rather than credited
+    /// with the night.
+    @ObservationIgnored private var sleepStartedAt: Date?
+
+    /// Whether the long-idle offer has already been made for the idle stretch in progress.
+    ///
+    /// One notification per stretch. Without this the offer would repeat on every tick, which is the
+    /// single fastest way to lose the notification authorisation for good.
+    @ObservationIgnored private var hasOfferedIdleTrim = false
+
+    /// The policy constants. One value, not exposed in the UI, for the reason
+    /// `SessionAutoClose.Policy` gives.
+    @ObservationIgnored private let autoClosePolicy: SessionAutoClose.Policy
+
+    /// How often the tick is allowed to evaluate. Matches `IdleMonitor.activeInterval`, because it
+    /// reads the same signal and is subject to the same energy gate.
+    private static let autoCloseCheckInterval: TimeInterval = IdleMonitor.activeInterval
+
+    /// When the tick last evaluated. A backwards clock resets it rather than locking the check out.
+    @ObservationIgnored private var lastAutoCloseCheck: Date?
+
     /// `defaults` is the gallery and test seam — pass a scratch suite and a preview cannot overwrite
     /// the real user's remembered project.
     public init(
         store: any LggrStore,
         clock: any DateProviding = SystemClock(),
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        notifications: NotificationGate? = nil,
+        idleSeconds: @escaping @Sendable () -> TimeInterval = IdleMonitor.systemIdleSeconds,
+        lastHeartbeat: @escaping @MainActor () -> Date? = { nil },
+        autoClosePolicy: SessionAutoClose.Policy = .default
     ) {
         self.store = store
         self.clock = clock
         self.defaults = defaults
         self.now = clock.now
         self.preferences = PreferencesDefaults.load(from: defaults)
+        self.notifications = notifications
+        self.idleSeconds = idleSeconds
+        self.lastHeartbeat = lastHeartbeat
+        self.autoClosePolicy = autoClosePolicy
     }
 
     // MARK: - Bootstrap
@@ -99,7 +173,23 @@ public final class SessionManager {
 
         await reloadProjects()
         await restoreActiveSession()
+        // Before today is read, so a session the previous run left open is already closed — and
+        // therefore already in today's list — rather than appearing there a moment later.
+        //
+        // This is the case that writes wrong data today: quit or crash with a session running and the
+        // record claims every hour between then and the next launch. The absence is dated from the
+        // last heartbeat, which is the instant the timeline is using for the same gap.
+        await evaluateAutoClose(absence: launchAbsence())
         await reloadToday()
+    }
+
+    /// What the previous run left behind, as a witness `SessionAutoClose` can close a session at.
+    ///
+    /// `nil` on a first launch, on a clean quit that beat afterwards, and whenever the beat is not
+    /// behind the clock — in which case there is no absence to account for and nothing is adjusted.
+    private func launchAbsence() -> SessionAutoClose.Absence? {
+        guard let beat = lastHeartbeat(), beat < clock.now else { return nil }
+        return SessionAutoClose.Absence(lastWitnessedAt: beat, kind: .appNotRunning)
     }
 
     private func restoreActiveSession() async {
@@ -161,10 +251,15 @@ public final class SessionManager {
 
         activeSession = session
         now = startedAt
+        // A new session is a new idle stretch as far as the offer is concerned, and a new
+        // completion to schedule.
+        hasOfferedIdleTrim = false
+        autoCloseNotice = nil
         syncTick()
 
         rememberStart(projectID: projectID, intendedOutcome: session.intendedOutcome)
         await persist(session, failureMessage: "Couldn't save this session.")
+        await scheduleSessionNotifications(for: session)
     }
 
     // MARK: - Pause and resume
@@ -190,6 +285,10 @@ public final class SessionManager {
         let snapshot = session
         Task { [weak self] in
             await self?.persist(snapshot, failureMessage: "Couldn't save this session.")
+            // A pause moves the finish line, so the pending completion is wrong the instant it is
+            // pressed. Rescheduling on resume rather than leaving the old one armed is the difference
+            // between a notification that is useful and one the user learns to ignore.
+            await self?.scheduleSessionNotifications(for: snapshot)
         }
     }
 
@@ -203,10 +302,27 @@ public final class SessionManager {
         activeSession = nil
         pendingReview = session
         now = clock.now
+        hasOfferedIdleTrim = false
         syncTick()
 
         await persist(session, failureMessage: "Couldn't save this session.")
         await reloadTodaySessions()
+
+        // Everything armed for this session is now a banner about the past.
+        //
+        // And **nothing is posted in its place.** A user who presses Finish is looking at the app;
+        // telling them what they have just done is the kind of notification that costs the
+        // authorisation the useful ones depend on. The `sessionCompleted` banner is the one that
+        // arrives when the *planned duration* runs out with nobody watching — scheduled by
+        // `scheduleSessionNotifications`, and withdrawn right here when the user gets there first.
+        cancelSessionNotifications()
+    }
+
+    /// Withdraws every notification that belongs to a session in flight.
+    private func cancelSessionNotifications() {
+        notifications?.cancel(.sessionCompleted)
+        notifications?.cancel(.halfway)
+        notifications?.cancel(.longIdle)
     }
 
     // MARK: - Discarding and deleting
@@ -236,8 +352,13 @@ public final class SessionManager {
         todaySessions.removeAll { $0.id == session.id }
         pauseCounts[session.id] = nil
         now = clock.now
+        hasOfferedIdleTrim = false
+        if autoCloseNotice?.session.id == session.id { autoCloseNotice = nil }
         // `activeSession` is already `nil`, so this is the call that stands the heartbeat down.
         syncTick()
+        // A session the user has just said did not happen must not produce a banner about it a
+        // quarter of an hour later.
+        cancelSessionNotifications()
 
         await remove(sessionID: session.id, failureMessage: "Couldn't discard that session.")
         return true
@@ -256,8 +377,10 @@ public final class SessionManager {
             activeSession = nil
             now = clock.now
             syncTick()
+            cancelSessionNotifications()
         }
         if pendingReview?.id == id { pendingReview = nil }
+        if autoCloseNotice?.session.id == id { autoCloseNotice = nil }
         todaySessions.removeAll { $0.id == id }
         pauseCounts[id] = nil
 
@@ -335,6 +458,10 @@ public final class SessionManager {
         let snapshot = session
         Task { [weak self] in
             await self?.persist(snapshot, failureMessage: "Couldn't save the new target.")
+            // Moving the target moves the finish line, so the two notifications that were armed
+            // against the old one are re-armed against the new. `+10` with a stale banner still
+            // pending would announce a completion ten minutes before the session reaches it.
+            await self?.scheduleSessionNotifications(for: snapshot)
         }
     }
 
@@ -419,6 +546,49 @@ public final class SessionManager {
         if pendingReview?.id == session.id { pendingReview = session }
 
         await persist(session, failureMessage: "Couldn't save this session.")
+    }
+
+    // MARK: - Filing a block the user labelled afterwards
+
+    /// Saves a session built from a reconstructed block.
+    ///
+    /// The record arrives already complete: `SessionFromEpisode` decided its bounds, its paused time,
+    /// its status and its provenance, and `TimelineModel` supplied the declared sessions the overlap
+    /// was computed against. Nothing about it is decided here — this method's whole job is that the
+    /// store is written by the one object allowed to write it.
+    ///
+    /// Three things it deliberately does **not** do:
+    ///
+    ///   * **It arms no notification and cancels none.** The session is already over. A banner
+    ///     announcing work the user has just described would be the kind of notification that costs
+    ///     the authorisation the useful ones depend on.
+    ///   * **It does not touch `activeSession`.** Labelling a block is not starting one, and a
+    ///     gesture on the timeline must never stop the timer somebody has running.
+    ///   * **It does not put the session into `pendingReview`.** It lands answered — see decision 2 in
+    ///     `SessionFromEpisode` — because three labelled blocks leaving three unanswered questions
+    ///     behind them is a decision queue, which is the failure this whole phase is measured against.
+    ///
+    /// - Returns: `false` when the session had not finished and nothing was written, so a caller
+    ///   cannot mistake a refusal for a save. A reconstruction always has an end; this guard is what
+    ///   stops a future caller from filing something else through here.
+    @discardableResult
+    public func fileReconstructed(_ session: FocusSession) async -> Bool {
+        guard session.isFinished, session.wasReconstructed else { return false }
+
+        // Interface first, disk second, like every other mutation here. Inserted rather than
+        // appended-and-forgotten so the row appears in Today at once, in the order the list keeps.
+        if todayInterval().contains(session.startedAt) {
+            todaySessions.removeAll { $0.id == session.id }
+            todaySessions.append(session)
+            todaySessions.sort { $0.startedAt > $1.startedAt }
+        }
+        now = clock.now
+
+        await persist(session, failureMessage: "Couldn't save this block as a session.")
+        // Re-read rather than trust the insert: a block labelled just after midnight belongs to
+        // yesterday, and the list on screen is today's.
+        await reloadTodaySessions()
+        return true
     }
 
     // MARK: - Accomplishments
@@ -520,7 +690,241 @@ public final class SessionManager {
         return projects.first { $0.id == id }?.name
     }
 
+    // MARK: - Closing a session the user forgot about
+
+    // The decision is `SessionAutoClose`'s, in `LggrKit`, and every case of it is proved there
+    // against fixtures. Everything below is the plumbing: gather the three witnesses, hand them over,
+    // and persist whatever comes back. No rule about *when* a session should close lives in this
+    // file — if one ever appears here, it is in the wrong place and untested.
+
+    /// Runs the decision once, and applies it if there is one.
+    ///
+    /// - Parameter absence: a stretch nobody witnessed, when the caller observed one — a launch after
+    ///   a quit, a wake after a sleep. `nil` on an ordinary evaluation.
+    public func evaluateAutoClose(absence: SessionAutoClose.Absence? = nil) async {
+        guard let session = activeSession else { return }
+        let instant = clock.now
+
+        let input = SessionAutoClose.Input(
+            session: session,
+            lastInputAt: lastInputInstant(at: instant),
+            absence: absence,
+            endOfDay: windows.day(containing: session.startedAt)?.end,
+            idleThreshold: preferences.idleThreshold,
+            now: instant,
+            policy: autoClosePolicy
+        )
+
+        guard let decision = SessionAutoClose.decide(input) else {
+            // Nothing to close. This is also the only branch on which the idle *offer* makes sense:
+            // input has stopped, the session is still describing something, and the user may want to
+            // end it early. Offering before the app would act is what keeps the action theirs.
+            await offerIdleTrimIfNeeded(for: session, at: instant, input: input)
+            return
+        }
+
+        await applyAutoClose(decision, to: session, at: instant)
+    }
+
+    /// The tick's evaluation, at most once every `autoCloseCheckInterval`.
+    ///
+    /// The throttle is not a micro-optimisation, it is acceptance criterion 8. The tick fires once a
+    /// second so the timer on screen counts, but `idleSeconds()` is a synchronous call into the window
+    /// server — and `IdleMonitor` polls the same value every *fifteen* seconds, with leeway, precisely
+    /// so that Lggr does not appear in "Apps Using Significant Energy". Asking fifteen times as often
+    /// for a decision whose shortest allowance is fifteen minutes would spend that budget for nothing.
+    private func tickAutoClose() {
+        let instant = clock.now
+        if let last = lastAutoCloseCheck,
+            instant.timeIntervalSince(last) < Self.autoCloseCheckInterval,
+            instant >= last
+        {
+            return
+        }
+        lastAutoCloseCheck = instant
+        Task { [weak self] in
+            await self?.evaluateAutoClose()
+        }
+    }
+
+    /// When input last reached the machine, derived from the idle timer.
+    ///
+    /// `nil` when the reading is not a number — a missing signal must never be the reason a session
+    /// ends, so it produces no idle decision rather than an instant far in the past.
+    private func lastInputInstant(at instant: Date) -> Date? {
+        let seconds = idleSeconds()
+        guard seconds.isFinite, seconds >= 0 else { return nil }
+        return instant.addingTimeInterval(-seconds)
+    }
+
+    /// Applies a decision: the session ends where the witness says, the record says who decided, and
+    /// the user is told.
+    private func applyAutoClose(
+        _ decision: SessionAutoClose.Decision,
+        to session: FocusSession,
+        at instant: Date
+    ) async {
+        var closed = session
+        guard closed.applyAutoClose(decision, at: instant) else { return }
+
+        activeSession = nil
+        // Straight into the review flow, exactly as `finishSession` does. The work happened; only
+        // its end was decided by the app, and a session that skipped "What happened?" because
+        // nobody pressed the button would be the same forgetting in a new place.
+        pendingReview = closed
+        now = instant
+        hasOfferedIdleTrim = false
+        syncTick()
+
+        let closedAtText = decision.closeAt.formatted(date: .omitted, time: .shortened)
+        autoCloseNotice = AutoCloseNotice(
+            session: closed,
+            decision: decision,
+            sentence: decision.sentence(closedAtText: closedAtText)
+        )
+
+        await persist(closed, failureMessage: "Couldn't save this session.")
+        await reloadTodaySessions()
+
+        cancelSessionNotifications()
+        // The one completion notification that is worth sending: the user was not there, so this is
+        // the only way they learn that a number changed. It states the adjusted end and the witness
+        // it came from rather than presenting it as an observed one.
+        await notifications?.post(
+            NotificationCopy.sessionAutoClosed(
+                outcome: closed.intendedOutcome,
+                decision: decision,
+                closedAtText: closedAtText
+            )
+        )
+    }
+
+    /// Clears the notice once the user has seen it. The session keeps its provenance forever; only
+    /// the announcement goes away.
+    public func acknowledgeAutoClose() {
+        autoCloseNotice = nil
+    }
+
+    /// Ends the running session at the last input Lggr recorded — the long-idle notification's
+    /// action, and the same code path the automatic close uses.
+    ///
+    /// Deliberately the same path: the button the user presses and the decision the app makes must
+    /// produce the same record, or the two disagree about what "the last input" means.
+    @discardableResult
+    public func endSessionAtLastInput() async -> Bool {
+        guard let session = activeSession else { return false }
+        let instant = clock.now
+        guard let lastInput = lastInputInstant(at: instant), lastInput > session.startedAt else {
+            // No usable reading, so there is nothing honest to close it at. Finishing now is the
+            // conservative answer and it is the user's own press, not an inference.
+            await finishSession()
+            return true
+        }
+        await applyAutoClose(
+            SessionAutoClose.Decision(
+                closeAt: lastInput,
+                reason: .idle,
+                uncountedDuration: instant.timeIntervalSince(lastInput)
+            ),
+            to: session,
+            at: instant
+        )
+        return true
+    }
+
+    /// Offers to end the session early, once per idle stretch.
+    ///
+    /// The threshold is the user's own idle threshold, not the auto-close allowance: the offer comes
+    /// first and the automatic close comes later, so the user gets the chance to decide before the
+    /// app decides for them. `keepGoing` is a real answer — it clears nothing and changes nothing,
+    /// and this kind does not ask again until input returns.
+    private func offerIdleTrimIfNeeded(
+        for session: FocusSession,
+        at instant: Date,
+        input: SessionAutoClose.Input
+    ) async {
+        guard session.isRunning else { return }
+        guard let lastInput = input.lastInputAt else { return }
+        let silence = instant.timeIntervalSince(lastInput)
+
+        guard silence >= max(60, preferences.idleThreshold) else {
+            // Input came back. The next stretch gets its own single offer.
+            hasOfferedIdleTrim = false
+            return
+        }
+        guard !hasOfferedIdleTrim else { return }
+        hasOfferedIdleTrim = true
+
+        await notifications?.post(
+            NotificationCopy.longIdle(
+                silence: silence,
+                proposedEndText: lastInput.formatted(date: .omitted, time: .shortened)
+            )
+        )
+    }
+
+    // MARK: - Notifications
+
+    /// Arms the two notifications a running session can produce, and withdraws them when it cannot.
+    ///
+    /// Both are scheduled as an offset from *now* against the session's own clock, so a session that
+    /// was paused for twenty minutes announces its completion twenty minutes later — the finish line
+    /// is the one `SessionClock` computes, never a wall-clock time recorded when the session started.
+    ///
+    /// An open-ended session arms nothing at all. There is no completion to announce, and a
+    /// notification for a session with no target would have to be invented out of a duration the user
+    /// never asked for.
+    private func scheduleSessionNotifications(for session: FocusSession) async {
+        guard let notifications else { return }
+        guard session.isRunning, let planned = session.plannedDuration, planned > 0 else {
+            notifications.cancel(.sessionCompleted)
+            notifications.cancel(.halfway)
+            return
+        }
+
+        let elapsed = session.elapsed(at: clock.now)
+        let remaining = max(0, planned - elapsed)
+
+        if remaining > 0 {
+            await notifications.post(
+                NotificationCopy.sessionCompleted(
+                    outcome: session.intendedOutcome,
+                    duration: planned,
+                    delay: remaining
+                )
+            )
+        } else {
+            notifications.cancel(.sessionCompleted)
+        }
+
+        // Halfway is only meaningful while the session has not reached it. A session resumed past
+        // its own midpoint arms nothing, rather than announcing a halfway point in the past.
+        let halfway = planned / 2
+        if halfway > elapsed {
+            await notifications.post(
+                NotificationCopy.halfway(
+                    outcome: session.intendedOutcome,
+                    remaining: planned - halfway,
+                    delay: halfway - elapsed
+                )
+            )
+        } else {
+            notifications.cancel(.halfway)
+        }
+    }
+
     // MARK: - Errors
+
+    /// Puts one sentence in front of the user through the app's single message surface.
+    ///
+    /// `04-screens.md` §3.3 gives the detail column exactly one of these, so a caller with something
+    /// to say routes it here rather than inventing a second banner. What arrives this way is not
+    /// always a failure — a block the record already accounts for is a fact, not a fault — and the
+    /// surface is deliberately the same either way: it is inline, never modal, never red, and states
+    /// what is true rather than what the user should have done.
+    public func surface(_ message: String) {
+        report(message)
+    }
 
     /// Dismisses the error banner. It comes back on the next failure.
     public func dismissError() {
@@ -535,6 +939,11 @@ public final class SessionManager {
     // MARK: - Sleep and wake
 
     private func handleSleep() {
+        // The instant is recorded, and that is the whole change: a session running when the lid
+        // closes has a witness now, so waking up eleven hours later closes it at 18:00 instead of
+        // crediting the night. Nothing is written here — `handleWake` decides, because sleep is the
+        // one notification that may be the last thing this process is told before it is frozen.
+        sleepStartedAt = clock.now
         // Nothing to record: the session's dates already describe what happened. Standing the
         // heartbeat down just stops us waking a sleeping machine once a second.
         tick.stop()
@@ -545,6 +954,14 @@ public final class SessionManager {
         // was away. No stored value is touched.
         now = clock.now
         syncTick()
+
+        let absence = sleepStartedAt.map {
+            SessionAutoClose.Absence(lastWitnessedAt: $0, kind: .machineAsleep)
+        }
+        sleepStartedAt = nil
+        Task { [weak self] in
+            await self?.evaluateAutoClose(absence: absence)
+        }
     }
 
     // MARK: - Ticking
@@ -560,6 +977,10 @@ public final class SessionManager {
         tick.start { [weak self] in
             guard let self else { return }
             self.now = self.clock.now
+            // The tick is where the idle rule is noticed, and it costs one read of the idle timer
+            // and a pure function. No new timer: `IdleMonitor` and the activity heartbeat are the
+            // two the capture subsystem is allowed, and this one was already running for the label.
+            self.tickAutoClose()
         }
     }
 

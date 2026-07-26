@@ -297,6 +297,45 @@ enum SnapshotMode {
                     .padding(24)
                 )
             },
+            // The end-of-day queue, and the same queue with nothing left in it.
+            //
+            // Photographed because this sheet's *copy* is the risky part rather than its layout: it is
+            // the one screen in the app that reports what the user did not declare, and the line
+            // between "3 blocks from today aren't labelled" and an accusation is a matter of words.
+            // Reviewing words on a machine with no Xcode means photographing them.
+            Screen(name: "end-of-day-review") {
+                AnyView(
+                    EndOfDayReviewSheet(
+                        items: UnlabelledWork.report(
+                            for: PreviewFixtures.dayTimeline,
+                            // The fixture day is a realistic one, so its blocks do not all clear the
+                            // twenty-minute bar. Lowered here so the photograph shows a queue rather
+                            // than the closing panel; the shipped constant is untouched.
+                            policy: UnlabelledWork.Policy(minimumBlockDuration: 5 * 60)
+                        )
+                        .blocks
+                        .map { episode in
+                            EndOfDayReviewSheet.Item(
+                                episode: episode,
+                                claim: SessionFromEpisode.claim(for: episode, existingSessions: [])
+                            )
+                        },
+                        projects: PreviewFixtures.projects,
+                        recentOutcomes: PreviewFixtures.preferences.recentOutcomes,
+                        estimateText: "about 2 minutes",
+                        onFile: { _, _ in }
+                    )
+                    .padding(24)
+                )
+            },
+            // Nothing left to label, which is the common state for a well-declared day. A fact and a
+            // way out — no praise, no count of what was filed, no score.
+            Screen(name: "end-of-day-review-empty") {
+                AnyView(
+                    EndOfDayReviewSheet(items: [], onFile: { _, _ in })
+                        .padding(24)
+                )
+            },
             Screen(name: "rule-offer") {
                 AnyView(
                     ReclassifySheet(

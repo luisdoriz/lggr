@@ -74,7 +74,14 @@ public struct PlannedVsReactive: Hashable, Sendable {
             durationByOrigin[origin, default: 0] += duration
             sessionCountByOrigin[origin, default: 0] += 1
             durationByWorkType[session.workType, default: 0] += duration
-            if session.isReactive != session.workType.isReactiveByDefault {
+            // Only a declared session can disagree with its own default, because only a declared
+            // session's flag was the user's to set. `SessionFromEpisode` forces `isReactive` true on
+            // every reconstruction — `INTELLIGENCE.md` §4 Phase 2 requires it — so counting those
+            // here would report the app's own policy as evidence that the user overrode a default,
+            // and the number would climb every time somebody labelled a deep-work block.
+            if session.provenance.statesIntent,
+                session.isReactive != session.workType.isReactiveByDefault
+            {
                 overridden += 1
             }
         }

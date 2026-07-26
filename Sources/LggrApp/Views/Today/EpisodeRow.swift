@@ -8,7 +8,9 @@ import SwiftUI
 // the absence ever becomes invisible, the block beside it starts to look like it accounts for time
 // it has no evidence for, which is the one failure this whole feature is arranged to avoid.
 //
-// Neither row owns behaviour. Phase 1 shows the day; turning a block into a session is Phase 2.
+// The block row owns exactly one piece of behaviour, and it is Phase 2's whole point: a block nobody
+// declared anything over offers to become a session. The gap row owns none — an absence is
+// information, not a thing to act on.
 
 // MARK: - Time
 
@@ -127,14 +129,36 @@ private struct VerticalLine: Shape {
 /// The roster is not repeated when it *is* the label. A block the builder could only name after its
 /// applications would otherwise print `Xcode, Terminal` twice, two lines apart, which reads as a
 /// rendering bug and costs the row its only line of real evidence.
+///
+/// A block nobody declared anything over carries one action: *This was…*, which opens
+/// `LabelBlockSheet` and turns the block into a real session with its measured times. It is offered
+/// on hover, on click anywhere in the row, and as a VoiceOver action — but **never as a context menu
+/// item**, because the row already installs one for the correction loop (`.reclassifiable`) and two
+/// context menus on one view is a menu that depends on modifier order to decide which of them opens.
+///
+/// A block that *is* part of a session gets no action at all. Not a dimmed one: there is nothing to
+/// label, and a control that explains why it cannot act is worse here than its absence, because the
+/// row above it is already the explanation.
 public struct EpisodeRow: View {
 
     private let episode: Episode
+    private let onLabel: (() -> Void)?
 
     @State private var isHovered = false
 
-    public init(episode: Episode) {
+    /// - Parameter onLabel: turns this block into a session. Absent in a host that cannot present the
+    ///   sheet — the gallery, the snapshot renderer — which removes the affordance rather than
+    ///   drawing one that does nothing.
+    public init(episode: Episode, onLabel: (() -> Void)? = nil) {
         self.episode = episode
+        self.onLabel = onLabel
+    }
+
+    /// Whether this row offers the gesture: a host that can perform it, and a block worth performing
+    /// it on.
+    private var labelAction: (() -> Void)? {
+        guard let onLabel, episode.isUnlabelled else { return nil }
+        return onLabel
     }
 
     public var body: some View {
@@ -167,6 +191,19 @@ public struct EpisodeRow: View {
 
             Spacer(minLength: Space.m)
 
+            if let labelAction {
+                // Revealed on hover and kept in the layout at zero opacity, exactly as `RowMoreMenu`
+                // is: a row that changes width when the pointer crosses it is a row that moves, and
+                // nothing in Lggr moves that the user did not move.
+                Button("This was…", action: labelAction)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .opacity(isHovered ? 1 : 0)
+                    .allowsHitTesting(isHovered)
+                    .lggrAnimation(Motion.tap, value: isHovered)
+                    .accessibilityHidden(true)
+            }
+
             Text(episode.durationText)
                 .font(Type.secondary)
                 .monospacedDigit()
@@ -182,6 +219,9 @@ public struct EpisodeRow: View {
         .padding(.horizontal, -Space.s)
         .onHover { isHovered = $0 }
         .lggrAnimation(Motion.tap, value: isHovered)
+        // The whole row is the target, not only the button that appears on it. Labelling a block has
+        // to cost one click; hunting for a control that fades in is two.
+        .modifier(TapToLabel(action: labelAction))
         // SPEC §5's correction loop, offered where the classification is actually visible. The menu is
         // absent — not disabled — when there is no application to write a rule about, which includes
         // any block whose identity was replaced with "Private" before it was written. See
@@ -194,6 +234,7 @@ public struct EpisodeRow: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(episode.label)
         .accessibilityValue(spokenDetail)
+        .modifier(LabelAccessibilityAction(action: labelAction))
     }
 
     // MARK: - Metadata
@@ -235,8 +276,12 @@ public struct EpisodeRow: View {
     }
 
     private var helpText: String {
-        "\(TimelineClock.range(from: episode.start, to: episode.end)) · \(episode.durationText). "
-            + provenance
+        var text = "\(TimelineClock.range(from: episode.start, to: episode.end)) · "
+            + "\(episode.durationText). \(provenance)"
+        if labelAction != nil {
+            text += " Click to make this a session with these times."
+        }
+        return text
     }
 
     private var spokenDetail: String {
@@ -248,6 +293,43 @@ public struct EpisodeRow: View {
         if let glances { parts.append(glances) }
         parts.append(provenance)
         return parts.joined(separator: ", ")
+    }
+}
+
+// MARK: - The one gesture a block carries
+
+/// Makes the whole row a click target, and attaches nothing at all when there is nothing to do.
+///
+/// Written as a modifier rather than as `.onTapGesture { action?() }` because a gesture recogniser
+/// installed with an empty body still swallows the click: a labelled block would stop passing taps
+/// through to whatever the row is sitting in, for the sake of calling nothing.
+private struct TapToLabel: ViewModifier {
+    let action: (() -> Void)?
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if let action {
+            content.onTapGesture(perform: action)
+        } else {
+            content
+        }
+    }
+}
+
+/// The same gesture, for a screen reader.
+///
+/// Separate from the button on the row, which is `accessibilityHidden` — the row combines its
+/// children into one element, so the button inside it is not reachable and a named action on the
+/// element is how VoiceOver gets there. Absent when the row has nothing to offer, rather than present
+/// and inert: an announced action that does nothing is worse than one that was never announced.
+private struct LabelAccessibilityAction: ViewModifier {
+    let action: (() -> Void)?
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if let action {
+            content.accessibilityAction(named: Text("Make this a session"), action)
+        } else {
+            content
+        }
     }
 }
 

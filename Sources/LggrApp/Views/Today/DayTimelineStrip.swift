@@ -32,9 +32,26 @@ import SwiftUI
 public struct DayTimelineStrip: View {
 
     private let timeline: DayTimeline
+    private let onLabelBlock: ((Episode) -> Void)?
+    private let onReviewUnlabelled: (() -> Void)?
 
-    public init(timeline: DayTimeline) {
+    /// - Parameters:
+    ///   - onLabelBlock: turns a block nobody declared anything over into a session. Absent in a host
+    ///     that cannot present the sheet, which removes the affordance from every row rather than
+    ///     drawing one that does nothing.
+    ///   - onReviewUnlabelled: opens the queue of this day's unlabelled blocks — `EndOfDayReviewSheet`.
+    ///     **This is why the queue does not depend on a notification.** The end-of-day banner is one
+    ///     way in; a user who declined notifications, or who never enabled that kind, must still be
+    ///     able to reach the batch that makes eight blocks take two minutes. A feature whose only
+    ///     entrance is a permission the user refused is a feature that does not exist for them.
+    public init(
+        timeline: DayTimeline,
+        onLabelBlock: ((Episode) -> Void)? = nil,
+        onReviewUnlabelled: (() -> Void)? = nil
+    ) {
         self.timeline = timeline
+        self.onLabelBlock = onLabelBlock
+        self.onReviewUnlabelled = onReviewUnlabelled
     }
 
     public var body: some View {
@@ -66,14 +83,35 @@ public struct DayTimelineStrip: View {
     /// day are a fact about the record rather than a measure of the person keeping it.
     private var header: some View {
         SectionHeader("Day") {
-            if let span {
-                Text(span)
-                    .font(Type.caption)
-                    .monospacedDigit()
-                    .foregroundStyle(Ink.support)
-                    .accessibilityLabel("From \(span)")
+            HStack(spacing: Space.m) {
+                if let span {
+                    Text(span)
+                        .font(Type.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(Ink.support)
+                        .accessibilityLabel("From \(span)")
+                }
+
+                // The one borderless section action, present only when there is something behind it.
+                //
+                // Titled *Label…* and not *3 unlabelled* — the count is exactly the badge
+                // `INTELLIGENCE.md` § 3.4 removed four times over, a number that grows when you forget
+                // to press start and falls when you perform triage. The button says what it does; the
+                // queue it opens says how long it is, once, after the user chose to look.
+                if hasUnlabelledWork, let onReviewUnlabelled {
+                    SectionAction(title: "Label…", action: onReviewUnlabelled)
+                }
             }
         }
+    }
+
+    /// Whether this day holds anything the queue would offer.
+    ///
+    /// The same test `UnlabelledWork` applies for the notification, so the button and the banner cannot
+    /// disagree about whether there is anything to do — and the button is simply absent on a day that
+    /// holds nothing, rather than opening a sheet that says so.
+    private var hasUnlabelledWork: Bool {
+        !UnlabelledWork.report(for: timeline).isEmpty
     }
 
     private var span: String? {
@@ -91,7 +129,10 @@ public struct DayTimelineStrip: View {
             ForEach(timeline.entries) { entry in
                 switch entry {
                 case .episode(let episode):
-                    EpisodeRow(episode: episode)
+                    EpisodeRow(
+                        episode: episode,
+                        onLabel: onLabelBlock.map { handler in { handler(episode) } }
+                    )
                 case .gap(let gap):
                     TimelineGapRow(gap: gap)
                 }

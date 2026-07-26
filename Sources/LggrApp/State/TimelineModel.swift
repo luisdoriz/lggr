@@ -116,6 +116,79 @@ public final class TimelineModel {
     /// Whether there is anything to draw. A day with neither blocks nor gaps has no section.
     public var hasContent: Bool { !timeline.isEmpty }
 
+    // MARK: - Turning a block into a session
+
+    // The decision is `SessionFromEpisode`'s, in `LggrKit`, and every case of it is proved there
+    // against fixtures. What lives here is the one thing the domain deliberately cannot do: hold the
+    // day's declared sessions, so a claim is computed against the same set the segmenter cut on. No
+    // rule about *what* a block may claim belongs in this file — if one appears here it is in the
+    // wrong place and untested.
+
+    /// The latest block nobody has declared anything over — what one keystroke acts on.
+    ///
+    /// `nil` when the day holds no such block, which is what removes the menu bar row rather than
+    /// dimming it. There is deliberately no count beside it: `INTELLIGENCE.md` §3.4 removed the
+    /// "3 undeclared blocks" badge, and a number that grows when you forget to press start is a
+    /// streak counter run backwards.
+    public var latestUnlabelledEpisode: Episode? { timeline.latestUnlabelledEpisode }
+
+    /// Whether this block can become a session, and over what span.
+    ///
+    /// Answered against the sessions this model already holds, so a block partly covered by declared
+    /// work is trimmed rather than double-counted. Computed on demand and never cached: a session
+    /// finishing changes the answer, and a cached claim would let a sheet open on a span another
+    /// session had taken in the meantime.
+    public func claim(
+        for episode: Episode
+    ) -> Result<SessionFromEpisode.Claim, SessionFromEpisode.Refusal> {
+        SessionFromEpisode.claim(for: episode, existingSessions: sessions)
+    }
+
+    /// The session this block becomes, ready to be filed.
+    ///
+    /// Computed here rather than at the call site so that the span the sheet showed and the span the
+    /// record claims come from one set of declared sessions — this model's. A host that ran the domain
+    /// function against its own copy of the day would be a second opinion about overlap, which is
+    /// exactly how time gets counted twice.
+    public func reconstruction(
+        for episode: Episode,
+        label: SessionFromEpisode.Label,
+        at instant: Date
+    ) -> Result<SessionFromEpisode.Reconstruction, SessionFromEpisode.Refusal> {
+        SessionFromEpisode.session(
+            for: episode,
+            label: label,
+            existingSessions: sessions,
+            at: instant
+        )
+    }
+
+    /// The session that accounts for a block this model refused to label, so the host can offer
+    /// *Correct times…* on the right record.
+    ///
+    /// Resolved by overlap rather than by `Episode.sessionID`, because a session can cover a block
+    /// without having lent it a name — it may have finished after the block was cut, or covered too
+    /// little of it to win the naming precedence.
+    public func sessionCovering(_ episode: Episode) -> FocusSession? {
+        let span = DateInterval(start: episode.start, end: max(episode.start, episode.end))
+        return sessions
+            .filter { session in
+                let end = session.endedAt ?? span.end
+                return max(session.startedAt, span.start) < min(end, span.end)
+            }
+            .max { $0.startedAt < $1.startedAt }
+    }
+
+    /// Looks a block up by identifier.
+    ///
+    /// The menu bar and the sheet route carry an id rather than a record, for the reason every
+    /// `SheetRoute` in the app does: the timeline is rebuilt on every flush, so the `Episode` a row
+    /// was drawn from is a value that has already been replaced by the time a sheet renders.
+    /// Resolving late means the sheet shows the block as it stands now or closes itself.
+    public func episode(id: UUID) -> Episode? {
+        timeline.episodes.first { $0.id == id }
+    }
+
     // MARK: - Loading
 
     /// Reads the day being shown out of the activity log and rebuilds.

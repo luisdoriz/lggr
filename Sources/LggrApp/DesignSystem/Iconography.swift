@@ -22,6 +22,10 @@ public enum Icon {
     public static let finish = "checkmark"
     public static let interruption = "bell.badge"
     public static let addAccomplishment = "plus.circle"
+    /// Turning a reconstructed block into a session — the clock run backwards, because the times
+    /// already exist and only the label is new. Deliberately not a warning glyph and not a badge: a
+    /// block nobody declared is an ordinary part of a day, not something wrong with one.
+    public static let labelBlock = "clock.arrow.circlepath"
 
     // MARK: Screen actions
     public static let export = "square.and.arrow.up"
@@ -35,6 +39,9 @@ public enum Icon {
     public static let accessibility = "accessibility"
     /// The Shortcuts tab in Settings.
     public static let shortcuts = "keyboard"
+    /// The Alerts tab in Settings. `bell`, not `bell.badge` — a badge implies something is waiting,
+    /// and nothing is waiting in a settings tab.
+    public static let notifications = "bell"
 
     // MARK: Empty states
     public static let emptyToday = "sun.max"
@@ -46,6 +53,9 @@ public enum Icon {
 
     // MARK: Status
     public static let error = "exclamationmark.triangle"
+    /// The same banner saying something that is not a failure — the sentence explaining a session
+    /// Lggr closed itself. Never the triangle: an explanation is not a warning.
+    public static let notice = "info.circle"
 
     // MARK: Row and menu affordances
     /// Dismisses the error banner; also the trailing remove control on an application list row.
@@ -53,6 +63,10 @@ public enum Icon {
     public static let add = "plus"
     public static let remove = "minus"
     public static let edit = "pencil"
+    /// A session whose end Lggr decided, when the stored reason cannot name its own glyph — a record
+    /// written before `autoCloseReason` sat beside `autoClosedAt`. A plain clock, deliberately: the
+    /// mark says *the app chose this number*, not *something went wrong with this session*.
+    public static let autoClosed = "clock"
     public static let copy = "doc.on.doc"
     public static let duplicate = "plus.square.on.square"
     public static let delete = "trash"

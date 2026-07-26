@@ -175,20 +175,52 @@ public struct SessionDetailView: View {
     /// trustworthy if a number the user typed is distinguishable from one Lggr watched, and this is
     /// that distinction being kept rather than being hidden.
     @ViewBuilder private var provenance: some View {
+        // Three facts, three lines, and one session can carry all of them: a block was labelled, the
+        // app closed it, and the user then corrected that. They are drawn oldest-first, which is also
+        // the order they happened in — reconstruction is how the record came to exist at all, the
+        // automatic close is the app's own arithmetic on it, and a hand correction is the last word.
+        if let reconstructedAt = session.reconstructedAt {
+            provenanceLine(
+                ReconstructedMark.help(reconstructedAt),
+                symbol: Icon.labelBlock,
+                spoken: ReconstructedMark.help(reconstructedAt)
+            )
+        }
+        // The line the app owes the user: this end was not observed running out and nobody pressed
+        // it, and here is the witness it came from. Stated on the record rather than only in the
+        // notification that announced it — that notification is off on a fresh install, so without
+        // this the number would simply have changed with nothing saying why.
+        if let autoClosedAt = session.autoClosedAt {
+            let sentence = AutoClosedMark.help(autoClosedAt, reason: session.autoCloseReason)
+            provenanceLine(
+                sentence,
+                symbol: session.autoCloseReason?.symbolName ?? Icon.autoClosed,
+                spoken: sentence
+            )
+        }
         if let editedAt = session.editedAt {
-            Label(
+            provenanceLine(
                 "Times corrected by hand on "
                     + editedAt.formatted(.dateTime.weekday(.wide).day().month(.wide)),
-                systemImage: Icon.edit
+                symbol: Icon.edit,
+                spoken: EditedMark.help(editedAt)
             )
+        }
+    }
+
+    private func provenanceLine(
+        _ text: String,
+        symbol: String,
+        spoken: String
+    ) -> some View {
+        Label(text, systemImage: symbol)
             .labelStyle(.titleAndIcon)
             .imageScale(.small)
             .font(Type.caption)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityLabel("Provenance")
-            .accessibilityValue(EditedMark.help(editedAt))
-        }
+            .accessibilityValue(spoken)
     }
 
     /// `● Receipt ingestion · Deep work · Monday 15 January · 9:00–9:50 · Planned`

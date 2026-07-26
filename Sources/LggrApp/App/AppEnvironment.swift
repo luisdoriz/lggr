@@ -39,6 +39,20 @@ public final class AppEnvironment {
     /// that governs all three. Inert until `bootstrap()` starts it.
     @ObservationIgnored public let capture: ActivityCapture
 
+    /// The per-kind notification switches, and the only object in Lggr that requests a permission.
+    ///
+    /// Inert until `bootstrap()` calls `prepare()`, which reads the existing authorisation **without
+    /// prompting**. Nothing at launch asks the user for anything; the ask happens when they switch a
+    /// notification on in Settings and nowhere else.
+    @ObservationIgnored public let notifications: NotificationGate
+
+    /// The two prompts that catch a user who never opens the app: the live offer to label a long
+    /// stretch of undeclared work, and the end-of-day review of what the day left unlabelled.
+    ///
+    /// Inert until `bootstrap()`, and inert after it too unless the user has switched one of the two
+    /// kinds on — both are off on a fresh install, and both cost nothing at all while off.
+    @ObservationIgnored public let prompts: ProactivePrompts
+
     /// The interruption inbox: what `⌘⇧I` writes into, and where it is processed.
     ///
     /// Owned here rather than by a view for the same reason capture is: `⌘⇧I` works with every window
@@ -75,6 +89,7 @@ public final class AppEnvironment {
         preferences: AppPreferences,
         appModel: AppModel,
         capture: ActivityCapture? = nil,
+        notificationService: (any NotificationService)? = nil,
         defaults: UserDefaults = .standard
     ) {
         self.store = store
@@ -82,14 +97,68 @@ public final class AppEnvironment {
         self.clock = clock
         self.preferences = preferences
         self.appModel = appModel
-        let sessionManager = SessionManager(store: store, clock: clock)
-        self.sessionManager = sessionManager
+
+        // Capture is built **before** the session manager now, and the order is load-bearing: the
+        // manager closes a session the previous run left open, and the instant it closes it at is
+        // this heartbeat's file. Reading it before `capture.start()` overwrites the beat is the whole
+        // mechanism — see `SessionManager.launchAbsence()`.
+        //
         // Defaulted rather than required so a test or the gallery can build an environment without
         // one. Constructing it records nothing; only `bootstrap()` does.
         let capture = capture ?? ActivityCapture(clock: clock, defaults: defaults)
         self.capture = capture
+
+        // The real service in the real app, the recording fake anywhere there is no business raising
+        // a banner. `UserNotificationService` is safe to construct in either case — it reports
+        // `.unavailable` in a process with no bundle identifier rather than touching the notification
+        // centre at all — but a host that passes the fake gets a test seam as well.
+        let notificationService = notificationService ?? UserNotificationService()
+        let notifications = NotificationGate(
+            service: notificationService,
+            switches: preferences.notifications,
+            persist: { [weak preferences] switches in preferences?.notifications = switches }
+        )
+        self.notifications = notifications
+
+        let sessionManager = SessionManager(
+            store: store,
+            clock: clock,
+            notifications: notifications,
+            // The same forty bytes `ActivityLaunchRecovery` dates the timeline's `.appNotRunning` gap
+            // from, so a forgotten session's end and the gap beside it are the same instant instead of
+            // two independent guesses.
+            lastHeartbeat: { [weak capture] in capture?.heartbeat.readLastBeatFromDisk() }
+        )
+        self.sessionManager = sessionManager
+
         let inbox = InboxModel(store: store, clock: clock)
         self.inbox = inbox
+
+        // Everything it reads is a closure, so the prompts have no opinion about where the day, the
+        // running session or the tracking state come from — and no way to hold a stale copy of any of
+        // them. `TimelineModel.shared` is read late for the reason `exportService` reads it late: the
+        // reconstructed day moves with every flush.
+        let prompts = ProactivePrompts(
+            gate: notifications,
+            clock: clock,
+            defaults: defaults,
+            schedule: { [weak preferences] in preferences?.promptSchedule ?? .default },
+            timeline: { TimelineModel.shared.timeline },
+            isSessionRunning: { [weak sessionManager] in sessionManager?.activeSession != nil },
+            // `.paused` exactly, not `!isRecording`: a suspended sampler and a paused one both mean
+            // silence, but they are different facts and `UnlabelledWork.Silence` names them
+            // separately. Reporting a locked screen as "tracking paused" would make the one
+            // diagnostic this feature has lie about why it said nothing.
+            isTrackingPaused: { [weak capture] in capture?.sampler.state == .paused }
+        )
+        // Both destinations are sheets on the main window, opened through `AppModel` so a notification
+        // pressed with every window closed lands on Today with the evidence in front of the user —
+        // exactly as the timeline row that offers the same gesture does.
+        prompts.onOpenReview = { [weak appModel] in appModel?.presentEndOfDayReview() }
+        prompts.onLabelBlock = { [weak appModel] episodeID in
+            appModel?.presentBlockLabel(episodeID: episodeID)
+        }
+        self.prompts = prompts
 
         // Reads the same day files the sampler writes and the same privacy lists Settings edits, so
         // the daily summary can name an application exactly as far as the user has allowed and no
@@ -201,12 +270,77 @@ public final class AppEnvironment {
         // is nothing to wait for — and a `⌃⇧L` pressed a tenth of a second after login should start a
         // session rather than fall on the floor.
         applyShortcuts()
+
+        // Before the session manager, because the manager's own bootstrap can close a session the
+        // previous run left open and post the one notification that reports it. `prepare()` reads the
+        // existing authorisation and registers the buttons; **it does not prompt.**
+        notifications.onAction = { [weak self] kind, action in
+            self?.handleNotificationAction(kind, action)
+        }
+        await notifications.prepare()
+
         await sessionManager.bootstrap()
         // Read early, because `load()` replaces the list wholesale: a capture that landed before the
         // first read came back would disappear from the screen — though never from the disk — until
         // something else reloaded it. `⌘⇧I` is live from the moment the menu bar exists.
         await inbox.load()
         await capture.start()
+
+        // Last, and only if the user has switched one of the two prompt kinds on. A fresh install has
+        // both off, so this installs no timer and does no work at all — and it is started after
+        // capture so that its first evaluation reads a timeline that has already been loaded rather
+        // than an empty one.
+        prompts.start()
+    }
+
+    // MARK: - Notification actions
+
+    /// What a button on a notification does.
+    ///
+    /// Every case here completes the thing the notification was about. None of them merely opens the
+    /// app: a notification whose only affordance is "come and look" is the re-engagement mechanism
+    /// this project does not ship, however useful its title sounds.
+    ///
+    /// Written over the action rather than over the kind, and exhaustively, so adding a button to
+    /// `NotificationActionKind` fails to compile here instead of shipping a button that does nothing.
+    public func handleNotificationAction(
+        _ kind: NotificationKind,
+        _ action: NotificationActionKind
+    ) {
+        switch action {
+        case .review:
+            // The session is already in `pendingReview`; the window is what is missing.
+            appModel.showMainWindow()
+        case .endAtLastInput:
+            Task { [weak sessionManager] in
+                await sessionManager?.endSessionAtLastInput()
+            }
+        case .keepGoing:
+            // A real answer, and deliberately a no-op: the session carries on untouched, and the
+            // offer does not come back until input does. Present so that "leave it alone" is
+            // something the user chooses rather than something they achieve by ignoring a banner.
+            break
+        case .openToday:
+            appModel.showMainWindow()
+        case .reviewUnlabelled:
+            // The queue, not the app. `openReview()` withdraws the banner and presents the sheet,
+            // which recomputes what is still unlabelled at the moment it renders.
+            appModel.showMainWindow()
+            prompts.openReview()
+        case .labelBlock:
+            // Resolved late, against the timeline as it stands: the stretch has grown since the banner
+            // was posted, and `SessionFromEpisode` backdates the session to the block's measured start.
+            // A stretch that is no longer on the timeline opens nothing rather than an empty sheet.
+            if prompts.labelOutstandingBlock() { appModel.showMainWindow() }
+        case .dismissBlock:
+            // Cheap and final, and deliberately writes nothing: the block was recorded as asked when
+            // the notification was posted, so dismissing and ignoring produce the same outcome.
+            prompts.dismissOutstandingBlock()
+        case .stopAsking:
+            // The obvious way out, taken from the banner itself. Moves the same switch the Alerts pane
+            // moves, and nothing ever moves it back.
+            Task { [weak prompts] in await prompts?.stopAsking(about: kind) }
+        }
     }
 
     // MARK: - Hot keys
@@ -305,6 +439,8 @@ public final class AppPreferences {
     private static let durationKey = "com.lggr.settings.defaultSessionDuration"
     private static let menuBarTimerKey = "com.lggr.settings.showTimerInMenuBar"
     private static let shortcutsKey = "com.lggr.settings.globalShortcuts"
+    private static let notificationsKey = "com.lggr.settings.notifications"
+    private static let promptScheduleKey = "com.lggr.settings.promptSchedule"
 
     /// The `UserPreferences` blob `SessionManager` loads at launch. Duplicated here — and *only*
     /// here — because the constant is private to that file and there is no shared owner for it.
@@ -364,6 +500,48 @@ public final class AppPreferences {
         }
     }
 
+    /// Which notifications the user has switched on.
+    ///
+    /// Read once at launch to restore `NotificationGate`, and written by the gate when a switch
+    /// moves — the gate is the writer because turning one on is what requests the authorisation, and
+    /// that ordering must not be something a caller can get wrong. Stored under this object's own
+    /// key and mirrored into the shared blob like the other three settings here.
+    public var notifications: NotificationSwitches {
+        get {
+            access(keyPath: \.notifications)
+            return notificationsStorage
+        }
+        set {
+            guard newValue != notificationsStorage else { return }
+            withMutation(keyPath: \.notifications) { notificationsStorage = newValue }
+            if let data = try? JSONEncoder().encode(newValue) {
+                defaults.set(data, forKey: Self.notificationsKey)
+            }
+            applyToStoredPreferences()
+        }
+    }
+
+    /// When Lggr may offer to label something: the prompt window, and the hour the end-of-day review
+    /// is allowed to look at the day.
+    ///
+    /// A real setting with a real effect — `ProactivePrompts` reads it through a closure on every
+    /// evaluation, so a window narrowed at four o'clock takes effect at four o'clock rather than at the
+    /// next launch. Stored under this object's own key and mirrored into the shared blob like the rest.
+    public var promptSchedule: ProactivePrompts.Schedule {
+        get {
+            access(keyPath: \.promptSchedule)
+            return promptScheduleStorage
+        }
+        set {
+            guard newValue != promptScheduleStorage else { return }
+            withMutation(keyPath: \.promptSchedule) { promptScheduleStorage = newValue }
+            if let data = try? JSONEncoder().encode(newValue) {
+                defaults.set(data, forKey: Self.promptScheduleKey)
+            }
+            applyToStoredPreferences()
+        }
+    }
+
     /// Called after `shortcuts` has been written, so the composition root can re-register them.
     ///
     /// A callback rather than a direct reference to `GlobalShortcutService`: this object is constructed
@@ -376,6 +554,8 @@ public final class AppPreferences {
     @ObservationIgnored private var durationStorage: TimeInterval
     @ObservationIgnored private var timerStorage: Bool
     @ObservationIgnored private var shortcutsStorage: GlobalShortcutBindings
+    @ObservationIgnored private var notificationsStorage: NotificationSwitches
+    @ObservationIgnored private var promptScheduleStorage: ProactivePrompts.Schedule
     @ObservationIgnored private let defaults: UserDefaults
 
     public init(defaults: UserDefaults = .standard) {
@@ -394,6 +574,23 @@ public final class AppPreferences {
         self.durationStorage = Self.clampDuration(storedDuration ?? stored.defaultSessionDuration)
         self.timerStorage = storedTimer ?? stored.showTimerInMenuBar
         self.shortcutsStorage = storedShortcuts ?? stored.shortcuts
+        self.notificationsStorage =
+            defaults.data(forKey: Self.notificationsKey)
+            .flatMap { try? JSONDecoder().decode(NotificationSwitches.self, from: $0) }
+            ?? NotificationSwitches(
+                sessionCompleted: stored.notifyOnSessionCompleted,
+                halfway: stored.notifyAtHalfway,
+                longIdle: stored.notifyOnLongIdle,
+                endOfDayReview: stored.notifyOnEndOfDayReview,
+                unlabelledBlock: stored.notifyOnUnlabelledBlock
+            )
+        self.promptScheduleStorage =
+            defaults.data(forKey: Self.promptScheduleKey)
+            .flatMap { try? JSONDecoder().decode(ProactivePrompts.Schedule.self, from: $0) }
+            ?? ProactivePrompts.Schedule(
+                hours: stored.promptHours,
+                endOfDayHour: stored.endOfDayReviewHour
+            )
     }
 
     // MARK: Mirroring
@@ -408,11 +605,25 @@ public final class AppPreferences {
             stored.defaultSessionDuration != durationStorage
                 || stored.showTimerInMenuBar != timerStorage
                 || stored.shortcuts != shortcutsStorage
+                || stored.notifyOnSessionCompleted != notificationsStorage.sessionCompleted
+                || stored.notifyAtHalfway != notificationsStorage.halfway
+                || stored.notifyOnLongIdle != notificationsStorage.longIdle
+                || stored.notifyOnEndOfDayReview != notificationsStorage.endOfDayReview
+                || stored.notifyOnUnlabelledBlock != notificationsStorage.unlabelledBlock
+                || stored.promptHours != promptScheduleStorage.hours
+                || stored.endOfDayReviewHour != promptScheduleStorage.endOfDayHour
         else { return }
 
         stored.defaultSessionDuration = durationStorage
         stored.showTimerInMenuBar = timerStorage
         stored.shortcuts = shortcutsStorage
+        stored.notifyOnSessionCompleted = notificationsStorage.sessionCompleted
+        stored.notifyAtHalfway = notificationsStorage.halfway
+        stored.notifyOnLongIdle = notificationsStorage.longIdle
+        stored.notifyOnEndOfDayReview = notificationsStorage.endOfDayReview
+        stored.notifyOnUnlabelledBlock = notificationsStorage.unlabelledBlock
+        stored.promptHours = promptScheduleStorage.hours
+        stored.endOfDayReviewHour = promptScheduleStorage.endOfDayHour
         guard let data = try? JSONEncoder().encode(stored) else { return }
         defaults.set(data, forKey: Self.storedPreferencesKey)
     }

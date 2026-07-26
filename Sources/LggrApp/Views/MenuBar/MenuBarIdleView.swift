@@ -55,6 +55,43 @@ public struct MenuBarTodayFooter: Equatable, Sendable {
     }
 }
 
+/// A block of the day nobody has declared anything over, as the popover offers it.
+///
+/// `INTELLIGENCE.md` §4 Phase 2 asks for the block in the popover with one keystroke on it, and this
+/// is the whole of what reaches a 28pt row inside 320pt: **the range and the measured time.** The
+/// application roster is deliberately not in it. It would truncate at this width, and it is one click
+/// away on the timeline the sheet opens over — whereas *when* and *how long* is what tells the user
+/// which stretch of their morning is being talked about, which is the thing they have to recognise
+/// before they can name it.
+///
+/// A value type rather than a view so the sentence is decided once and can be asserted without a
+/// popover, and so the row renders from a fixture with no sampler and no store.
+public struct UnlabelledBlockOffer: Equatable, Sendable {
+
+    /// `Label 9:04–9:58 · 41m`
+    public let title: String
+    /// The same fact without the interpuncts or the en dash, which VoiceOver reads as "dot" and as a
+    /// pause.
+    public let spokenLabel: String
+
+    public init(title: String, spokenLabel: String) {
+        self.title = title
+        self.spokenLabel = spokenLabel
+    }
+
+    /// Built from the block itself. The duration is the time measured in an application, never the
+    /// wall-clock span — the same figure the timeline row shows, so the popover and Today cannot
+    /// disagree about how long a block was.
+    public init(episode: Episode) {
+        let duration = DurationFormatting.compact(episode.activeDuration)
+        self.init(
+            title: "Label \(TimelineClock.range(from: episode.start, to: episode.end)) · \(duration)",
+            spokenLabel: "Label the block from "
+                + "\(TimelineClock.spokenRange(from: episode.start, to: episode.end)), \(duration)"
+        )
+    }
+}
+
 /// The six entry actions, in the order `SPEC.md` § 1 requires them.
 @MainActor
 public struct MenuBarIdleView: View {
@@ -68,6 +105,10 @@ public struct MenuBarIdleView: View {
         public var startSession: () -> Void
         public var quickTimer: (Int) -> Void
         public var reviewLastSession: () -> Void
+        /// Labels the most recent block nobody declared anything over. Absent when there is no such
+        /// block, or no host that can present the sheet — which removes the row rather than dimming
+        /// it, because a block that does not exist has no explanation worth a line of the menu.
+        public var labelLastBlock: (() -> Void)?
         public var addAccomplishment: () -> Void
         public var captureInterruption: (() -> Void)?
         public var openInbox: () -> Void
@@ -80,6 +121,7 @@ public struct MenuBarIdleView: View {
             startSession: @escaping () -> Void = {},
             quickTimer: @escaping (Int) -> Void = { _ in },
             reviewLastSession: @escaping () -> Void = {},
+            labelLastBlock: (() -> Void)? = nil,
             addAccomplishment: @escaping () -> Void = {},
             captureInterruption: (() -> Void)? = nil,
             openInbox: @escaping () -> Void = {},
@@ -89,6 +131,7 @@ public struct MenuBarIdleView: View {
             self.startSession = startSession
             self.quickTimer = quickTimer
             self.reviewLastSession = reviewLastSession
+            self.labelLastBlock = labelLastBlock
             self.addAccomplishment = addAccomplishment
             self.captureInterruption = captureInterruption
             self.openInbox = openInbox
@@ -101,7 +144,15 @@ public struct MenuBarIdleView: View {
     /// requires a decision.
     public static let quickTimerMinutes = [25, 50]
 
+    /// `⌘⇧L` — one keystroke on the most recent block nobody declared anything over.
+    ///
+    /// In the `⌘⇧` family the popover already uses for its own rows (`⌘⇧Space`, `⌘⇧A`, `⌘⇧I`) rather
+    /// than a global hot key: this is not a fifth thing to configure, it is a row of a menu that is
+    /// already open, and `GlobalShortcutAction` deliberately stays at five.
+    public static let labelBlockShortcut = KeyboardShortcut("l", modifiers: [.command, .shift])
+
     private let pendingReview: FocusSession?
+    private let unlabelledBlock: UnlabelledBlockOffer?
     private let footer: MenuBarTodayFooter
     private let inboxCount: Int
     private let actions: Actions
@@ -111,16 +162,27 @@ public struct MenuBarIdleView: View {
 
     public init(
         pendingReview: FocusSession? = nil,
+        unlabelledBlock: UnlabelledBlockOffer? = nil,
         footer: MenuBarTodayFooter,
         inboxCount: Int = 0,
         actions: Actions = Actions(),
         tracking: TrackingControls? = nil
     ) {
         self.pendingReview = pendingReview
+        self.unlabelledBlock = unlabelledBlock
         self.footer = footer
         self.inboxCount = max(0, inboxCount)
         self.actions = actions
         self.tracking = tracking
+    }
+
+    /// The label row is present only when there is a block to label *and* somewhere to label it.
+    ///
+    /// Both halves, because either alone is a dead control: an offer with no handler does nothing, and
+    /// a handler with no block would have to invent one.
+    private var blockOffer: (offer: UnlabelledBlockOffer, action: () -> Void)? {
+        guard let unlabelledBlock, let action = actions.labelLastBlock else { return nil }
+        return (unlabelledBlock, action)
     }
 
     public var body: some View {
@@ -152,6 +214,26 @@ public struct MenuBarIdleView: View {
             )
 
             Color.clear.frame(height: Space.xs)
+
+            // The Phase 2 gesture, one keystroke from the menu bar. Deliberately **below** Start
+            // Focus Session and deliberately **not** the primary row: `INTELLIGENCE.md` §7 risk 8 is
+            // that reconstruction cannibalises the product it belongs to, and the resolution is that
+            // the session stays the primary action. This row is how you catch up, not how you work.
+            //
+            // Present only while there is a block to label, which is also why it carries no count.
+            // A row that is permanently there with a number on it is the "3 undeclared blocks" badge
+            // §3.4 removed — a streak counter run in reverse.
+            if let blockOffer {
+                MenuBarRow(
+                    id: .labelLastBlock,
+                    symbol: Icon.labelBlock,
+                    title: blockOffer.offer.title,
+                    shortcut: Self.labelBlockShortcut,
+                    focus: $focus,
+                    action: blockOffer.action
+                )
+                .accessibilityLabel(blockOffer.offer.spokenLabel)
+            }
 
             quickTimerRow
 
@@ -283,6 +365,7 @@ public struct MenuBarIdleView: View {
         var rows: [MenuBarRowID] = []
         if pendingReview != nil { rows.append(.reviewLastSession) }
         rows.append(.startSession)
+        if blockOffer != nil { rows.append(.labelLastBlock) }
         rows.append(contentsOf: Self.quickTimerMinutes.map { MenuBarRowID.quickTimer(minutes: $0) })
         rows.append(.addAccomplishment)
         if actions.captureInterruption != nil { rows.append(.captureInterruption) }

@@ -65,6 +65,7 @@ public struct MenuBarContentView: View {
             } else {
                 MenuBarIdleView(
                     pendingReview: pendingReview,
+                    unlabelledBlock: unlabelledBlock,
                     footer: MenuBarTodayFooter(
                         sessions: todaySessions,
                         isUnavailable: hasStoreError && todaySessions.isEmpty
@@ -117,6 +118,23 @@ public struct MenuBarContentView: View {
         environment?.capture.privacy.controls
     }
 
+    // MARK: - The block nobody declared
+
+    /// The most recent block of today nobody has declared anything over, if there is one.
+    ///
+    /// Read from `TimelineModel.shared` for the reason `AppEnvironment` reads it the same way: ambient
+    /// capture runs from launch whether or not a window is open, so the object holding the day cannot
+    /// belong to a view's lifetime — and the popover is the surface most likely to be the only one
+    /// open. Gated on the composition root so the gallery and the snapshot renderer, which have no
+    /// route to present the sheet, show no row rather than an inert one.
+    ///
+    /// Read in this view's own body, like everything else here, so the row appears and disappears as
+    /// the day is rebuilt.
+    private var unlabelledBlock: UnlabelledBlockOffer? {
+        guard environment != nil else { return nil }
+        return TimelineModel.shared.latestUnlabelledEpisode.map(UnlabelledBlockOffer.init(episode:))
+    }
+
     // MARK: - Escape
 
     /// `Esc` dismisses the popover (§ 5.1). A zero-sized button is how a keyboard shortcut gets
@@ -163,6 +181,18 @@ public struct MenuBarContentView: View {
                 // when a session ends (§ 1.3).
                 leavingPopover { appModel?.presentReview() }
             },
+            // Like the review row, and for the same reason: the popover cannot host a sheet, so this
+            // is one of the few rows that opens the window. It is worth it here — the sheet is a
+            // statement about a block on the timeline, and the timeline is the evidence the user needs
+            // in front of them to make it. `nil` when there is no such block, which removes the row.
+            labelLastBlock: unlabelledBlock == nil
+                ? nil
+                : {
+                    guard
+                        let episode = TimelineModel.shared.latestUnlabelledEpisode
+                    else { return }
+                    leavingPopover { appModel?.presentBlockLabel(episodeID: episode.id) }
+                },
             addAccomplishment: {
                 leavingPopover { appModel?.presentAccomplishmentEditor() }
             },
@@ -267,6 +297,8 @@ public struct MenuBarContentView: View {
 enum MenuBarRowID: Hashable {
     case reviewLastSession
     case startSession
+    /// Label the most recent block nobody declared anything over. Present only while there is one.
+    case labelLastBlock
     /// One per inline duration segment — a quick timer that needs a submenu is not quick.
     case quickTimer(minutes: Int)
     case addAccomplishment

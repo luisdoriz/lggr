@@ -50,6 +50,62 @@ public struct UserPreferences: Codable, Hashable, Sendable {
     public var dataRetentionDays: Int
     public var launchAtLogin: Bool
     public var showTimerInMenuBar: Bool
+
+    // MARK: Notifications
+    //
+    // `SPEC.md` § Notifications names four kinds and `03-data-model.md` § 2.8 declares three of them
+    // here — with two of the three defaulting to `true`. **They default to `false` instead, and the
+    // deviation is the whole point.** macOS grants one notification authorisation for the whole app,
+    // Lggr requests it only when a user switches one of these on, and a switch that ships already on
+    // while nothing has ever been authorised is a setting that reads as enabled and does nothing.
+    // Off is the only default under which every one of these is true the moment the user sees it.
+    //
+    // Each is independent, because the failure mode is shared: one notification the user did not
+    // want costs the authorisation, and the useful ones die with it in System Settings where Lggr
+    // cannot ask again.
+
+    /// Post a notification when a session reaches its planned duration.
+    public var notifyOnSessionCompleted: Bool
+
+    /// Post a notification halfway through a planned session.
+    public var notifyAtHalfway: Bool
+
+    /// Offer to trim the session when input has been absent long enough to matter.
+    public var notifyOnLongIdle: Bool
+
+    /// Offer the end-of-day review of blocks that were never declared.
+    ///
+    /// `ProactivePrompts` is its scheduler, so this is a live switch with a row in Settings ▸ Alerts.
+    ///
+    /// **It does not fire on a schedule, and the distinction is the whole design.**
+    /// `endOfDayReviewHour` is permission to *look at the record*, not a cause to send anything: the
+    /// notification is posted only when `UnlabelledWork.report(for:)` finds blocks worth labelling,
+    /// and a day with none sends nothing at all — no summary, no congratulation. A banner that
+    /// arrived because the clock reached a number would be the re-engagement mechanism this app does
+    /// not have.
+    public var notifyOnEndOfDayReview: Bool
+
+    /// Offer, once, to label a long stretch of work with no session running.
+    ///
+    /// The only notification in Lggr that interrupts work in progress, which is why it is off by
+    /// default like all the others and why it can be switched off from the banner itself. Bounded by
+    /// `promptHours`, silent while a session runs, while tracking is paused and while the screen is
+    /// locked, and asked at most once per stretch of work — see
+    /// `UnlabelledWork.liveOffer(in:now:conditions:policy:)`, where each of those is a named case.
+    public var notifyOnUnlabelledBlock: Bool
+
+    /// The hours in which Lggr may offer to label something.
+    ///
+    /// A prompt at 23:40 is an intrusion however useful its content, and Lggr cannot know a person's
+    /// day. So the window is the user's, it bounds both prompts, and the default is a *narrowing*
+    /// guess: nine to six means a seven-o'clock starter gets silence rather than a badly timed offer,
+    /// which is the direction the error is allowed to run in.
+    public var promptHours: PromptHours
+
+    /// Local hour at which the end-of-day review is allowed to look at the day. 0–23.
+    ///
+    /// Not "the hour the notification arrives": see `notifyOnEndOfDayReview`.
+    public var endOfDayReviewHour: Int
     /// The project the start panel pre-selects, so the common case needs no interaction.
     public var lastProjectID: UUID?
     /// Recently used intended outcomes, most recent first, offered as suggestions.
@@ -76,6 +132,13 @@ public struct UserPreferences: Codable, Hashable, Sendable {
         dataRetentionDays: Int = 90,
         launchAtLogin: Bool = false,
         showTimerInMenuBar: Bool = true,
+        notifyOnSessionCompleted: Bool = false,
+        notifyAtHalfway: Bool = false,
+        notifyOnLongIdle: Bool = false,
+        notifyOnEndOfDayReview: Bool = false,
+        notifyOnUnlabelledBlock: Bool = false,
+        promptHours: PromptHours = .default,
+        endOfDayReviewHour: Int = 18,
         lastProjectID: UUID? = nil,
         recentOutcomes: [String] = []
     ) {
@@ -91,6 +154,13 @@ public struct UserPreferences: Codable, Hashable, Sendable {
         self.dataRetentionDays = max(1, dataRetentionDays)
         self.launchAtLogin = launchAtLogin
         self.showTimerInMenuBar = showTimerInMenuBar
+        self.notifyOnSessionCompleted = notifyOnSessionCompleted
+        self.notifyAtHalfway = notifyAtHalfway
+        self.notifyOnLongIdle = notifyOnLongIdle
+        self.notifyOnEndOfDayReview = notifyOnEndOfDayReview
+        self.notifyOnUnlabelledBlock = notifyOnUnlabelledBlock
+        self.promptHours = promptHours
+        self.endOfDayReviewHour = min(23, max(0, endOfDayReviewHour))
         self.lastProjectID = lastProjectID
         self.recentOutcomes = Self.normalized(recentOutcomes)
     }
@@ -142,6 +212,13 @@ public struct UserPreferences: Codable, Hashable, Sendable {
         case dataRetentionDays
         case launchAtLogin
         case showTimerInMenuBar
+        case notifyOnSessionCompleted
+        case notifyAtHalfway
+        case notifyOnLongIdle
+        case notifyOnEndOfDayReview
+        case notifyOnUnlabelledBlock
+        case promptHours
+        case endOfDayReviewHour
         case lastProjectID
         case recentOutcomes
     }
@@ -171,6 +248,23 @@ public struct UserPreferences: Codable, Hashable, Sendable {
                 Bool.self, forKey: .launchAtLogin) ?? fallback.launchAtLogin,
             showTimerInMenuBar: try container.decodeIfPresent(
                 Bool.self, forKey: .showTimerInMenuBar) ?? fallback.showTimerInMenuBar,
+            // A preferences file written before notifications existed carries none of these keys,
+            // and the fallback is off — so upgrading Lggr never turns a notification on for
+            // somebody who has not asked for one.
+            notifyOnSessionCompleted: try container.decodeIfPresent(
+                Bool.self, forKey: .notifyOnSessionCompleted) ?? fallback.notifyOnSessionCompleted,
+            notifyAtHalfway: try container.decodeIfPresent(
+                Bool.self, forKey: .notifyAtHalfway) ?? fallback.notifyAtHalfway,
+            notifyOnLongIdle: try container.decodeIfPresent(
+                Bool.self, forKey: .notifyOnLongIdle) ?? fallback.notifyOnLongIdle,
+            notifyOnEndOfDayReview: try container.decodeIfPresent(
+                Bool.self, forKey: .notifyOnEndOfDayReview) ?? fallback.notifyOnEndOfDayReview,
+            notifyOnUnlabelledBlock: try container.decodeIfPresent(
+                Bool.self, forKey: .notifyOnUnlabelledBlock) ?? fallback.notifyOnUnlabelledBlock,
+            promptHours: try container.decodeIfPresent(PromptHours.self, forKey: .promptHours)
+                ?? fallback.promptHours,
+            endOfDayReviewHour: try container.decodeIfPresent(
+                Int.self, forKey: .endOfDayReviewHour) ?? fallback.endOfDayReviewHour,
             lastProjectID: try container.decodeIfPresent(UUID.self, forKey: .lastProjectID),
             recentOutcomes: try container.decodeIfPresent([String].self, forKey: .recentOutcomes)
                 ?? []
@@ -196,6 +290,13 @@ public struct UserPreferences: Codable, Hashable, Sendable {
         try container.encode(dataRetentionDays, forKey: .dataRetentionDays)
         try container.encode(launchAtLogin, forKey: .launchAtLogin)
         try container.encode(showTimerInMenuBar, forKey: .showTimerInMenuBar)
+        try container.encode(notifyOnSessionCompleted, forKey: .notifyOnSessionCompleted)
+        try container.encode(notifyAtHalfway, forKey: .notifyAtHalfway)
+        try container.encode(notifyOnLongIdle, forKey: .notifyOnLongIdle)
+        try container.encode(notifyOnEndOfDayReview, forKey: .notifyOnEndOfDayReview)
+        try container.encode(notifyOnUnlabelledBlock, forKey: .notifyOnUnlabelledBlock)
+        try container.encode(promptHours, forKey: .promptHours)
+        try container.encode(endOfDayReviewHour, forKey: .endOfDayReviewHour)
         try container.encodeIfPresent(lastProjectID, forKey: .lastProjectID)
         try container.encode(recentOutcomes, forKey: .recentOutcomes)
     }

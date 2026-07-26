@@ -171,15 +171,23 @@ private struct RootWindowContent: View {
 
     private var detailColumn: some View {
         VStack(spacing: 0) {
-            if let message = bannerMessage {
+            if let banner = bannerMessage {
                 ErrorBanner(
-                    message: message,
-                    recoveryTitle: recoveryTitle,
+                    message: banner.message,
+                    // Nothing to recover from when the banner is stating a fact rather than a
+                    // failure: *Show in Finder* beside "Ended at 12:04" would be offering the data
+                    // folder as the remedy for something that is not broken.
+                    recoveryTitle: banner.isFailure ? recoveryTitle : nil,
+                    kind: banner.kind,
                     onRecover: { environment.revealDataFolder() },
                     onDismiss: {
                         manager.dismissError()
                         weeklyModel.dismissError()
                         environment.exportService.clearFailure()
+                        // The notice is acknowledged, not deleted: the session keeps `autoClosedAt`
+                        // and its reason forever, and `SessionRow` and `SessionDetailView` go on
+                        // showing them. Only the announcement goes away.
+                        manager.acknowledgeAutoClose()
                     }
                 )
                 .padding(.horizontal, Space.xl)
@@ -309,7 +317,13 @@ private struct RootWindowContent: View {
                 appModel.presentSessionEditor(sessionID: session.id)
             },
             // The row has already confirmed by the time this runs.
-            deleteSession: { session in delete(session) }
+            deleteSession: { session in delete(session) },
+            labelBlock: { episode in
+                appModel.presentBlockLabel(episodeID: episode.id)
+            },
+            // The queue, reachable without a notification. `DayTimelineStrip` shows the action only
+            // when the day holds something it would offer, so this never opens an empty sheet.
+            reviewUnlabelled: { appModel.presentEndOfDayReview() }
         )
     }
 
@@ -457,11 +471,43 @@ private struct RootWindowContent: View {
     /// Export` is reachable from the menu bar with no window open, `ExportService` opens the window so
     /// there is somewhere to read the sentence, and a message tied to one section would then be
     /// invisible on whichever section happened to be selected.
-    private var bannerMessage: String? {
-        if let message = manager.lastError { return message }
-        if let message = environment.exportService.failure { return message }
-        guard appModel.section == .weeklyReview else { return nil }
-        return weeklyModel.lastError
+    ///
+    /// The automatic close rides it too, and last. It is the one thing on this banner that is not a
+    /// failure: a session Lggr closed itself is a number that changed while nobody was watching, and
+    /// `SessionManager.autoCloseNotice` is the sentence that says where the new end came from. Without
+    /// a reader it was a control that existed in code and never appeared — the completion notification
+    /// is off on a fresh install, so on that install the end simply moved in silence. Last in the
+    /// order, because a store that could not be written is more urgent than an explanation.
+    private var bannerMessage: Banner? {
+        if let message = manager.lastError { return Banner(failure: message) }
+        if let message = environment.exportService.failure { return Banner(failure: message) }
+        if appModel.section == .weeklyReview, let message = weeklyModel.lastError {
+            return Banner(failure: message)
+        }
+        guard let notice = manager.autoCloseNotice else { return nil }
+        return Banner(notice: notice.sentence)
+    }
+
+    /// What the one banner is currently saying, and whether it is a failure.
+    ///
+    /// The distinction is not cosmetic: it decides the recovery button and the word VoiceOver leads
+    /// with. Announcing "Error, ended at 12:04, the last input Lggr recorded" would make provenance
+    /// sound like a fault, which is the one thing every note about `autoClosedAt` says it is not.
+    struct Banner: Equatable {
+        let message: String
+        let kind: ErrorBanner.Kind
+
+        var isFailure: Bool { kind == .failure }
+
+        init(failure message: String) {
+            self.message = message
+            self.kind = .failure
+        }
+
+        init(notice message: String) {
+            self.message = message
+            self.kind = .notice
+        }
     }
 
     // MARK: - Weekly Review
@@ -580,7 +626,109 @@ private struct RootWindowContent: View {
             interruptionAccomplishmentPanel(interruptionID: interruptionID)
         case .editSession(let sessionID):
             sessionEditPanel(sessionID: sessionID)
+        case .labelBlock(let episodeID):
+            labelBlockPanel(episodeID: episodeID)
+        case .endOfDayReview:
+            endOfDayReviewPanel
         }
+    }
+
+    /// "Today's record" — the queue of blocks nobody declared anything over.
+    ///
+    /// The queue is assembled **here, now**, from `UnlabelledWork.report(for:)` over the timeline as it
+    /// currently stands — never from a list captured when the notification was posted. Minutes have
+    /// passed since then, and a queue that offered a block a session has since accounted for would be
+    /// the sheet arguing with the record.
+    ///
+    /// An empty report is a valid state and renders the closing panel rather than closing itself: the
+    /// user pressed a button and is owed one sentence saying why there is nothing to do, not a sheet
+    /// that flashes and vanishes.
+    @ViewBuilder private var endOfDayReviewPanel: some View {
+        let report = environment.prompts.currentReport()
+        EndOfDayReviewSheet(
+            items: report.blocks.map { episode in
+                let classification = classification(for: episode)
+                return EndOfDayReviewSheet.Item(
+                    episode: episode,
+                    claim: timelineModel.claim(for: episode),
+                    suggestedProjectID: classification?.projectID,
+                    suggestedWorkType: classification
+                        .flatMap { SessionFromEpisode.suggestedWorkType(for: $0.category) }
+                        ?? environment.startSessionContext().lastWorkType
+                )
+            },
+            projects: manager.projects,
+            recentOutcomes: manager.preferences.recentOutcomes,
+            estimateText: report.estimateText,
+            setAside: report.setAside,
+            onFile: { episode, label in labelBlock(episode, as: label) },
+            // Skipping writes nothing at all. The block stays on the timeline, labellable there, and
+            // ages out silently into neutral tracked time — `INTELLIGENCE.md` §3.4.
+            onSkip: { _ in },
+            onClose: { appModel.dismissSheet() }
+        )
+    }
+
+    /// "This was…", opened from a timeline row or from the menu bar's one keystroke.
+    ///
+    /// Everything the sheet renders is resolved here, at present time, rather than captured when the
+    /// row was clicked: the timeline is rebuilt on every flush of the sampler, and a claim computed a
+    /// minute ago may since have been taken by a session that finished. `TimelineModel` owns the day's
+    /// declared sessions, so it is what answers whether the span is still free.
+    ///
+    /// The project and work type are pre-filled from the *rules the user wrote*, not from inference.
+    /// `RulesModel.engine` classifies the block's dominant application; a rule that assigns a project
+    /// supplies one, and the category it returns supplies a work type through
+    /// `SessionFromEpisode.suggestedWorkType`. Both fail closed — no rule, no pre-fill — which is
+    /// `INTELLIGENCE.md` §3.8's refusal to infer a project before there is evidence to infer from.
+    @ViewBuilder private func labelBlockPanel(episodeID: UUID) -> some View {
+        if let episode = timelineModel.episode(id: episodeID) {
+            let classification = classification(for: episode)
+            LabelBlockSheet(
+                episode: episode,
+                outcome: timelineModel.claim(for: episode),
+                projects: manager.projects,
+                suggestedProjectID: classification?.projectID,
+                // The user's last work type when the rules have nothing to say, which is the same
+                // fallback the start panel uses and for the same reason: it is what they were
+                // actually doing.
+                suggestedWorkType: classification
+                    .flatMap { SessionFromEpisode.suggestedWorkType(for: $0.category) }
+                    ?? environment.startSessionContext().lastWorkType,
+                recentOutcomes: manager.preferences.recentOutcomes,
+                onSave: { label in
+                    labelBlock(episode, as: label)
+                    appModel.dismissSheet()
+                },
+                // Present only when there really is a session accounting for this block, which is the
+                // only case where correcting times is the way through.
+                onCorrectTimes: timelineModel.sessionCovering(episode).map { covering in
+                    { appModel.presentSessionEditor(sessionID: covering.id) }
+                },
+                onCancel: { appModel.dismissSheet() }
+            )
+        } else {
+            // The day was rebuilt into different blocks while this route was up — the sampler flushed
+            // and the segmenter cut elsewhere. Nothing to label, so the sheet closes itself rather
+            // than showing a form about a block that is no longer on the timeline. The same
+            // arrangement every other route here uses for the same race.
+            Color.clear
+                .frame(width: 1, height: 1)
+                .onAppear { appModel.dismissSheet() }
+                .accessibilityHidden(true)
+        }
+    }
+
+    /// What the user's rules make of this block, or `nil` when there is nothing to ask about.
+    ///
+    /// The dominant application only. A block's second and third applications are evidence about the
+    /// block, not about its project, and consulting them would be a vote — which is a model with two
+    /// voters wearing a rule table's clothes.
+    private func classification(for episode: Episode) -> Classification? {
+        guard let app = episode.dominantApp, !app.bundleIdentifier.isEmpty else { return nil }
+        return rulesModel.engine.classify(
+            ActivityContext(bundleIdentifier: app.bundleIdentifier, displayName: app.displayName)
+        )
     }
 
     /// "Correct the times", opened from Today, from the history or from a pushed detail.
@@ -778,6 +926,29 @@ private struct RootWindowContent: View {
         }
     }
 
+    /// Turns a block into a session and files it.
+    ///
+    /// The claim is recomputed here rather than reusing the one the sheet opened on: the sampler may
+    /// have flushed and a session may have finished while the user was typing, and the arithmetic that
+    /// decides the bounds must be the arithmetic that runs last. A refusal at this point is the honest
+    /// outcome — the record already accounts for the span — and it surfaces through the same banner
+    /// every other failure in the detail column uses rather than silently writing nothing.
+    private func labelBlock(_ episode: Episode, as label: SessionFromEpisode.Label) {
+        switch timelineModel.reconstruction(for: episode, label: label, at: environment.clock.now) {
+        case .success(let reconstruction):
+            Task {
+                guard await manager.fileReconstructed(reconstruction.session) else { return }
+                // The block is now part of a session, so the segmenter has new ground truth to cut on
+                // and the row it came from changes to the user's own sentence. `todaySessions` changing
+                // rebuilds the timeline through this screen's own `onChange`; the history range is
+                // re-read here because a labelled block belongs in it too.
+                await sessionsModel.reloadIfCurrent()
+            }
+        case .failure(let refusal):
+            manager.surface(refusal.sentence)
+        }
+    }
+
     private func submit(_ review: SessionReview) {
         Task {
             await manager.submitReview(
@@ -863,8 +1034,36 @@ private struct RootWindowContent: View {
 /// `xmark` that appears on hover, and it returns on the next failure.
 struct ErrorBanner: View {
 
+    /// Whether the sentence is a failure or a fact.
+    ///
+    /// One surface, two things it can be saying. `.failure` is every existing caller and is the
+    /// default, so no call site, no glyph and no announcement changes. `.notice` exists for the
+    /// automatic close, whose sentence explains a number rather than reporting a fault — announcing
+    /// "Error, ended at 12:04, the last input Lggr recorded" would turn provenance into a warning,
+    /// which is the one thing every note about `autoClosedAt` says it must not be.
+    enum Kind: Hashable {
+        case failure
+        case notice
+
+        /// What VoiceOver leads with.
+        var spokenRole: String {
+            switch self {
+            case .failure: "Error"
+            case .notice: "Notice"
+            }
+        }
+
+        var symbolName: String {
+            switch self {
+            case .failure: Icon.error
+            case .notice: Icon.notice
+            }
+        }
+    }
+
     let message: String
     let recoveryTitle: String?
+    var kind: Kind = .failure
     let onRecover: () -> Void
     let onDismiss: () -> Void
 
@@ -872,7 +1071,7 @@ struct ErrorBanner: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: Space.s) {
-            Image(systemName: Icon.error)
+            Image(systemName: kind.symbolName)
                 .imageScale(.medium)
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
@@ -909,7 +1108,7 @@ struct ErrorBanner: View {
         .onHover { isHovering = $0 }
         .lggrAnimation(Motion.tap, value: isHovering)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Error")
+        .accessibilityLabel(kind.spokenRole)
         .accessibilityValue(message)
     }
 }

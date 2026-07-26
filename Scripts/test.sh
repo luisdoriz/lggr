@@ -67,7 +67,7 @@ fi
 # A suite that suddenly shrinks is the quieter version of the same failure: a target that stopped
 # being discovered still reports a healthy-looking number for whatever remains. The floor is
 # committed, so a genuine reduction has to be an explicit, reviewable edit to this file.
-MINIMUM_TESTS=746
+MINIMUM_TESTS=930
 if [ "$TEST_COUNT" -lt "$MINIMUM_TESTS" ]; then
     echo ""
     echo "FAIL: only $TEST_COUNT tests ran; this suite has had at least $MINIMUM_TESTS."

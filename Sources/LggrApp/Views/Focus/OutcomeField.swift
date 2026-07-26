@@ -19,6 +19,14 @@ public struct OutcomeField: View {
     private let recentOutcomes: [String]
     @FocusState.Binding private var focus: StartPanelField?
     private let showsEmptyHint: Bool
+    /// The ghost text in the empty field.
+    ///
+    /// A parameter rather than a constant because the review queue has something better to put here
+    /// than an example: the applications that were in front during the block. It is a *placeholder*
+    /// and never inserted text — `INTELLIGENCE.md` §2's interaction law, and the reason a wrong
+    /// suggestion costs the user zero keystrokes. A roster of application names is not a sentence
+    /// anybody would write, so it is never what gets saved.
+    private let placeholder: String
     private let onSubmit: () -> Void
     private let onCancel: () -> Void
 
@@ -38,6 +46,7 @@ public struct OutcomeField: View {
         recentOutcomes: [String],
         focus: FocusState<StartPanelField?>.Binding,
         showsEmptyHint: Bool,
+        placeholder: String = "Finish the receipt deduplication PR",
         onSubmit: @escaping () -> Void,
         onCancel: @escaping () -> Void
     ) {
@@ -45,6 +54,8 @@ public struct OutcomeField: View {
         self.recentOutcomes = recentOutcomes
         self._focus = focus
         self.showsEmptyHint = showsEmptyHint
+        let trimmed = placeholder.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.placeholder = trimmed.isEmpty ? "Finish the receipt deduplication PR" : trimmed
         self.onSubmit = onSubmit
         self.onCancel = onCancel
     }
@@ -75,7 +86,7 @@ public struct OutcomeField: View {
     // MARK: - The field
 
     private var field: some View {
-        TextField("Finish the receipt deduplication PR", text: $text)
+        TextField(placeholder, text: $text)
             .textFieldStyle(.plain)
             .font(Type.outcome)
             .lineLimit(1)

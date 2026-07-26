@@ -3,11 +3,13 @@ import SwiftUI
 
 // Settings. See docs/_design/04-screens.md § 4.7.
 //
-// § 4.7 draws five tabs. **This ships three**, because every control on them changes something the
+// § 4.7 draws five tabs. **This ships four**, because every control on them changes something the
 // user can observe, and a pane full of switches wired to nothing is worse than a short pane: it
 // teaches the user that this screen does not do anything.
 //
 //   • **General** — the default session duration, the menu bar timer, and where the work is kept.
+//   • **Alerts** — the notifications Lggr can send, each individually switchable, and one honest line
+//     about what macOS has said. `AlertSettingsView`.
 //   • **Shortcuts** — the five global hot keys, each with a recorder, a reset and a way to switch it
 //     off, and each registered the moment it is recorded. `ShortcutSettingsView`.
 //   • **Privacy** — the tracking switch, the two application lists, the retention period, delete
@@ -19,9 +21,14 @@ import SwiftUI
 // now, `QuickActions` gives every one of them something to do, and the pane reports the registrations
 // macOS refused — so the tab is here, and the condition it was waiting on is the condition it met.
 //
-// Two tabs § 4.7 draws are still absent, and each is absent for the same reason the third was:
-// **Notifications** would configure notifications that are not posted, and **Tracking** would
-// duplicate controls Privacy already owns. Neither is a preference Lggr can honour today.
+// **Alerts arrived the same way, and only now.** It was absent because it "would configure
+// notifications that are not posted"; `SessionManager` posts them, `NotificationGate` gates each kind
+// individually, and the pane shows a row only for the kinds something actually schedules. The
+// end-of-day review is a kind with no scheduler, so it has no row — the same test the other tabs had
+// to pass.
+//
+// One tab § 4.7 draws is still absent, for the reason the other two were: **Tracking** would
+// duplicate controls Privacy already owns.
 //
 // `UserPreferences.trackWindowTitles` is deliberately not surfaced anywhere. It governs a capability
 // that does not exist: `ActivityInterval` has no field for a window title, Lggr never reads one, and
@@ -69,6 +76,7 @@ public struct SettingsView: View {
     /// which is almost never the thing they left last week.
     private enum Tab: Hashable {
         case general
+        case alerts
         case shortcuts
         case privacy
     }
@@ -79,6 +87,15 @@ public struct SettingsView: View {
     /// toggle needs to say when it takes effect.
     private let liveShowsTimerInMenuBar: Bool
     private let privacy: PrivacyModel
+    /// The notification switches and the live authorisation.
+    ///
+    /// Optional for the same reason `shortcutService` is: the gallery and the snapshot renderer draw
+    /// this pane with no composition root, and a tab that would configure nothing is not shown at all
+    /// rather than shown inert.
+    private let notifications: NotificationGate?
+    /// The scheduler behind the two undeclared-work prompts, so switching one on or off here starts or
+    /// stops it at once. Optional for the same reason `notifications` is.
+    private let prompts: ProactivePrompts?
     /// The live hot-key registrations, so the Shortcuts tab can name the ones macOS refused.
     ///
     /// Optional for the same reason the reveal closures are: the gallery and the snapshot renderer draw
@@ -98,6 +115,8 @@ public struct SettingsView: View {
         storage: StorageSummary,
         liveShowsTimerInMenuBar: Bool,
         privacy: PrivacyModel,
+        notifications: NotificationGate? = nil,
+        prompts: ProactivePrompts? = nil,
         shortcutService: GlobalShortcutService? = nil,
         onRevealDataFolder: (() -> Void)? = nil,
         onRevealActivityFolder: (() -> Void)? = nil,
@@ -107,6 +126,8 @@ public struct SettingsView: View {
         self.storage = storage
         self.liveShowsTimerInMenuBar = liveShowsTimerInMenuBar
         self.privacy = privacy
+        self.notifications = notifications
+        self.prompts = prompts
         self.shortcutService = shortcutService
         self.onRevealDataFolder = onRevealDataFolder
         self.onRevealActivityFolder = onRevealActivityFolder
@@ -127,6 +148,8 @@ public struct SettingsView: View {
             storage: environment.storage,
             liveShowsTimerInMenuBar: environment.sessionManager.preferences.showTimerInMenuBar,
             privacy: environment.capture.privacy,
+            notifications: environment.notifications,
+            prompts: environment.prompts,
             shortcutService: environment.shortcutService,
             onRevealDataFolder: { environment.revealDataFolder() },
             onRevealActivityFolder: { environment.revealActivityFolder() },
@@ -161,6 +184,20 @@ public struct SettingsView: View {
             general
                 .tabItem { Label("General", systemImage: SidebarSection.settings.symbolName) }
                 .tag(Tab.general)
+
+            // Shown only when there is a gate behind it. A tab of switches that configure nothing is
+            // the failure this file exists to prevent, and the gallery is exactly the host that would
+            // have one.
+            if let notifications {
+                AlertSettingsView(
+                    gate: notifications,
+                    preferences: preferences,
+                    prompts: prompts,
+                    onOpenSystemSettings: { AlertSettingsView.openSystemNotificationSettings() }
+                )
+                .tabItem { Label("Alerts", systemImage: Icon.notifications) }
+                .tag(Tab.alerts)
+            }
 
             ShortcutSettingsView(preferences: preferences, service: shortcutService)
                 .tabItem { Label("Shortcuts", systemImage: Icon.shortcuts) }

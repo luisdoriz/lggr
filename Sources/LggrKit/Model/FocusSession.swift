@@ -107,6 +107,46 @@ public struct FocusSession: Identifiable, Codable, Hashable, Sendable {
     /// is intent, not evidence, and adjusting it leaves every recorded time exactly as observed.
     public var editedAt: Date?
 
+    /// When Lggr closed this session itself, or `nil` when its end was pressed, hand-entered, or
+    /// still to come.
+    ///
+    /// The sibling of `editedAt`, and deliberately not the same field. `editedAt` says *the user
+    /// typed this number*; this says *the app chose this number, and can name the witness it chose
+    /// it from*. Conflating them would have the app claim the user's authorship for its own
+    /// arithmetic — and an app-adjusted time presented as an observed one is the confidently wrong
+    /// record the whole design is arranged to avoid. `SessionAutoClose.applyAutoClose` carries the
+    /// full reasoning.
+    ///
+    /// Set by `applyAutoClose(_:at:)` only. A session can carry this *and* `editedAt`: the app
+    /// closed it at the last heartbeat and the user then corrected that, which is two facts and
+    /// reads correctly as two.
+    public var autoClosedAt: Date?
+
+    /// Which witness `autoClosedAt`'s end came from. `nil` whenever `autoClosedAt` is.
+    ///
+    /// Stored rather than recomputed, because the evidence it was derived from — an idle reading, a
+    /// heartbeat file — is gone by the time anybody reads the session back, and "ended at 12:04"
+    /// with no reason attached is a number the user cannot check.
+    public var autoCloseReason: SessionAutoCloseReason?
+
+    /// When the user labelled a block Lggr had already measured, or `nil` for a session they
+    /// declared before doing the work.
+    ///
+    /// The third provenance field, and the one that changes an aggregate rather than a caption.
+    /// `editedAt` says *the user typed this number*; `autoClosedAt` says *the app chose this number*;
+    /// this says *the times were measured and the label came afterwards*. Read `provenance` rather
+    /// than this, and `SessionFromEpisode` for the full reasoning — the short version is that work
+    /// somebody labelled at four o'clock is not the same evidence as work they committed to at nine,
+    /// and `PlannedVsReactive` must never conflate them.
+    ///
+    /// An instant rather than a flag, for the reason `autoClosedAt` is one: *when* the label was
+    /// applied is the difference between labelling this morning's block this afternoon and labelling
+    /// it next Thursday. Set by `SessionFromEpisode.session(for:label:existingSessions:at:)` only,
+    /// and nothing clears it — a reconstruction is marked forever, per `INTELLIGENCE.md` §4 Phase 2.
+    /// A session can carry this *and* `editedAt`: the block was labelled and its times were then
+    /// corrected, which is two facts and reads correctly as two.
+    public var reconstructedAt: Date?
+
     public init(
         id: UUID = UUID(),
         projectID: UUID? = nil,
@@ -125,7 +165,10 @@ public struct FocusSession: Identifiable, Codable, Hashable, Sendable {
         nextStep: String? = nil,
         isReactive: Bool? = nil,
         interruptionCount: Int = 0,
-        editedAt: Date? = nil
+        editedAt: Date? = nil,
+        autoClosedAt: Date? = nil,
+        autoCloseReason: SessionAutoCloseReason? = nil,
+        reconstructedAt: Date? = nil
     ) {
         self.id = id
         self.projectID = projectID
@@ -145,5 +188,10 @@ public struct FocusSession: Identifiable, Codable, Hashable, Sendable {
         self.isReactive = isReactive ?? workType.isReactiveByDefault
         self.interruptionCount = max(0, interruptionCount)
         self.editedAt = editedAt
+        self.autoClosedAt = autoClosedAt
+        // A reason with no instant beside it would be a claim with no provenance, and an instant
+        // with no reason would be a number nobody can check. Neither half stands alone.
+        self.autoCloseReason = autoClosedAt == nil ? nil : autoCloseReason
+        self.reconstructedAt = reconstructedAt
     }
 }
