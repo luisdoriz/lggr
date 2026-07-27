@@ -23,9 +23,26 @@ public final class JSONFileStore: LggrStore {
     /// could land on disk after a newer one.
     private var writeSequence: UInt64 = 0
 
+    /// Bumped every time a document is taken from disk, and carried by every write.
+    ///
+    /// This is what makes the external-change refusal airtight rather than nearly airtight. When a
+    /// write is refused the store reloads, which re-arms the writer's identity check against the new
+    /// file — so a *second* save that was already in flight, built on the document from before the
+    /// reload, would sail through the identity check and put the stale document on disk after all.
+    /// The generation travels with the document, so the writer can reject anything descended from a
+    /// document it has already refused.
+    private var documentGeneration: UInt64 = 0
+
     /// Set when the file on disk could not be read and was preserved under another name. The app
     /// surfaces this; an unreadable store must never be indistinguishable from a first launch.
     public private(set) var quarantineNotice: String?
+
+    /// Set when `store.json` was changed by something other than this instance, so a save was refused
+    /// rather than allowed to overwrite it.
+    ///
+    /// Sibling to `quarantineNotice` and there for the same reason: the app has to be able to tell the
+    /// user, because the alternative is two copies of Lggr quietly diverging and one of them winning.
+    public private(set) var externalChangeNotice: String?
 
     public init(fileURL: URL) {
         self.fileURL = fileURL
@@ -246,6 +263,66 @@ public final class JSONFileStore: LggrStore {
                 + "The original is still there, saved as \(quarantinedAs)."
         }
         snapshot = load.snapshot
+        documentGeneration &+= 1
+    }
+
+    /// The message the app shows when a save was refused because the file had changed.
+    private func message(for change: StoreFileChange) -> String {
+        let name = fileURL.lastPathComponent
+        var lines = [
+            """
+            \(name) was changed by something other than this copy of Lggr — another instance, or a \
+            backup being restored — so this change was not saved. Lggr expected \(change.expected) \
+            and found \(change.found). The file on disk has been left exactly as it is, and Lggr has \
+            reloaded it.
+            """
+        ]
+        if let preservedAs = change.preservedAs {
+            lines.append(
+                "What Lggr had not yet written was saved alongside it as \(preservedAs), so nothing "
+                    + "has been thrown away."
+            )
+        }
+        if let preserveFailure = change.preserveFailure {
+            lines.append(
+                "The unsaved change could not be written alongside it either: \(preserveFailure)"
+            )
+        }
+        return lines.joined(separator: " ")
+    }
+
+    /// Handles a write the writer refused because the file no longer matched what was loaded.
+    ///
+    /// Three things happen, in this order, and none of them may destroy a record:
+    ///
+    /// 1. Nothing is written. The file on disk is left byte-for-byte as whatever changed it left it.
+    /// 2. The document that was not written has already been preserved beside the store by the
+    ///    writer, so the records this instance holds are not lost either.
+    /// 3. The in-memory document is dropped and re-read, so this instance stops being stale.
+    ///
+    /// **Why not simply take the disk copy, or simply keep memory?** Taking the disk copy silently
+    /// discards records this instance already told the user were saved. Keeping memory is the defect
+    /// itself: it discards whatever the other writer put there, which is why a restored backup gets
+    /// quietly undone. Merging the two is worse than either — with whole-document saves there is no
+    /// way to tell "this record was deleted over there" from "this record is not there yet", so a
+    /// union would resurrect rows the user deleted and a per-collection pick would silently choose one
+    /// user's edit over another's. The only resolution that cannot destroy a record the user believes
+    /// is saved is to keep *both* copies, write neither over the other, and say so. The mutation then
+    /// fails loudly, which is the same contract as D6: a change that did not reach the disk must not
+    /// stay visible as though it had.
+    private func resolve(_ change: StoreFileChange) async -> StoreError {
+        let notice = message(for: change)
+        externalChangeNotice = notice
+
+        // Not a rollback to the previous document: that one is stale too. Both are older than what is
+        // on disk now, so the only honest thing to hold is the file.
+        snapshot = nil
+        loadTask = nil
+        // Best effort. If the reload fails the store stays empty-handed and the next read tries
+        // again — which is right, because guessing would put us back where we started.
+        _ = try? await loaded()
+
+        return StoreError.persistenceFailure(notice)
     }
 
     /// Applies `body` to the in-memory document, then writes the whole document.
@@ -260,18 +337,41 @@ public final class JSONFileStore: LggrStore {
     /// user is now looking at.
     private func mutate(_ body: (inout StoreSnapshot) -> Void) async throws {
         let previous = try await loaded()
+
+        // Read here, not next to the write. The generation has to be the one the document being
+        // written actually descends from, and `loaded()` is the only thing that bumps it — so it must
+        // be sampled in the same await-free stretch that takes `previous`. Sampling it after the
+        // backup's `await` would let a refusal-and-reload that completed during that suspension stamp
+        // this stale document with the post-reload generation, which is precisely the check it is
+        // here to fail.
+        let generation = documentGeneration
+
         var updated = previous
         body(&updated)
         updated.schemaVersion = StoreSnapshot.currentSchemaVersion
         snapshot = updated
 
+        // Once per launch, before anything of this instance's is written over the file the user
+        // arrived with. Cheap, and the only thing standing between a bad write and a lost week.
+        await file.captureLaunchBackup(besides: fileURL)
+
         writeSequence &+= 1
         let sequence = writeSequence
+        let outcome: SnapshotWriteOutcome
         do {
-            try await file.write(updated, to: fileURL, sequence: sequence)
+            outcome = try await file.write(
+                updated,
+                to: fileURL,
+                sequence: sequence,
+                generation: generation
+            )
         } catch {
             if snapshot == updated { snapshot = previous }
             throw error
+        }
+
+        if case .refused(let change) = outcome {
+            throw await resolve(change)
         }
     }
 }
@@ -295,6 +395,18 @@ private actor SnapshotFile {
     private let timestampFormatter: DateFormatter
     private var lastWrittenSequence: UInt64 = 0
 
+    /// The identity of the file the document in memory came from. Everything that touches the file
+    /// goes through this actor, so this is the one place the answer can be kept honestly.
+    private var fileGuard = StoreFileGuard()
+
+    /// No document older than this generation may be written. Raised when a write is refused, so every
+    /// save already in flight from the same stale document is refused too rather than sneaking in
+    /// behind the reload.
+    private var minimumGeneration: UInt64 = 0
+
+    /// Whether this launch has already copied the document the user arrived with.
+    private var hasCapturedLaunchBackup = false
+
     init() {
         // Every coder setting lives on StoreSnapshot, so the format the store writes and the format
         // anything else reads cannot drift apart.
@@ -312,8 +424,15 @@ private actor SnapshotFile {
     /// is preserved — either moved aside, or refused outright — never overwritten.
     func read(from url: URL) throws -> SnapshotLoad {
         guard FileManager.default.fileExists(atPath: url.path) else {
+            fileGuard.adopt(.absent)
             return SnapshotLoad(snapshot: StoreSnapshot())
         }
+
+        // Stat *before* reading, not after. If the file changes between the two, the recorded identity
+        // then describes an older file than the bytes we are holding, and the next write is refused —
+        // which is the safe direction. Statting afterwards would record the newer file's identity
+        // against the older file's contents, and the next write would happily overwrite the change.
+        fileGuard.adoptIdentity(of: url)
 
         let data: Data
         do {
@@ -358,8 +477,18 @@ private actor SnapshotFile {
     /// dropped rather than allowed to put an older document back on top of a newer one — the newer
     /// document already contains this one's changes, because every mutation starts from the current
     /// in-memory snapshot.
-    func write(_ snapshot: StoreSnapshot, to url: URL, sequence: UInt64) throws {
-        guard sequence > lastWrittenSequence else { return }
+    ///
+    /// `generation` identifies which read the document descends from, and the write is refused if the
+    /// file no longer matches what that read saw. This is the core of the fix: a store that writes its
+    /// snapshot back unconditionally erases every change made by anything else — a second instance, a
+    /// restored backup — and does it silently.
+    func write(
+        _ snapshot: StoreSnapshot,
+        to url: URL,
+        sequence: UInt64,
+        generation: UInt64
+    ) throws -> SnapshotWriteOutcome {
+        guard sequence > lastWrittenSequence else { return .supersededByNewerWrite }
 
         let data: Data
         do {
@@ -369,8 +498,74 @@ private actor SnapshotFile {
                 "Could not encode the Lggr store: \(error.localizedDescription)"
             )
         }
+
+        let found = StoreFileIdentity.read(url)
+        let expected = fileGuard.expectedIdentity ?? .absent
+
+        // A document from before a refusal, arriving after the reload that followed it. It looks
+        // current to the identity check and is not.
+        guard generation >= minimumGeneration else {
+            return .refused(preserve(data, besides: url, expected: expected, found: found))
+        }
+
+        if case .changed = fileGuard.verify(against: found) {
+            // Refuse everything descended from this document, not just this write.
+            minimumGeneration = generation &+ 1
+            return .refused(preserve(data, besides: url, expected: expected, found: found))
+        }
+
         try AtomicFileWriter.write(data, to: url)
+        fileGuard.adoptIdentity(of: url)
         lastWrittenSequence = sequence
+        return .written
+    }
+
+    /// Copies the document the user arrived with, once per launch, before this instance writes over it.
+    ///
+    /// Best effort by design: a folder that will not take a backup is not a reason to refuse to record
+    /// the session the user just finished. It reads the file rather than the in-memory document, so the
+    /// backup is a copy of what was actually there, and reading does not disturb the file's identity.
+    func captureLaunchBackup(besides url: URL) {
+        guard !hasCapturedLaunchBackup else { return }
+        hasCapturedLaunchBackup = true
+        _ = try? StoreBackups.capture(storeAt: url)
+    }
+
+    /// Writes a refused document beside the store so the records it holds are not lost.
+    ///
+    /// Never overwrites, never throws: the caller's job is to refuse the write, and a preservation
+    /// failure must not turn into a second failure that loses the disk copy too. What happened is
+    /// reported back so the user can be told the whole truth.
+    private func preserve(
+        _ data: Data,
+        besides url: URL,
+        expected: StoreFileIdentity,
+        found: StoreFileIdentity
+    ) -> StoreFileChange {
+        let directory = url.deletingLastPathComponent()
+        let stamp = timestampFormatter.string(from: Date())
+
+        var destination = directory.appendingPathComponent("store-unwritten-\(stamp).json")
+        if FileManager.default.fileExists(atPath: destination.path) {
+            destination = directory.appendingPathComponent(
+                "store-unwritten-\(stamp)-\(UUID().uuidString).json"
+            )
+        }
+
+        do {
+            try AtomicFileWriter.write(data, to: destination)
+            return StoreFileChange(
+                expected: expected,
+                found: found,
+                preservedAs: destination.lastPathComponent
+            )
+        } catch {
+            return StoreFileChange(
+                expected: expected,
+                found: found,
+                preserveFailure: error.localizedDescription
+            )
+        }
     }
 
     /// Moves an unreadable file aside and returns the name it was preserved under, so the app can
@@ -389,6 +584,9 @@ private actor SnapshotFile {
 
         do {
             try FileManager.default.moveItem(at: url, to: destination)
+            // The document is gone from `url`, so the next write is a first write and must be allowed
+            // to create it. Leaving the moved file's identity recorded would refuse every save.
+            fileGuard.adopt(.absent)
         } catch {
             throw StoreError.persistenceFailure(
                 """
@@ -400,6 +598,19 @@ private actor SnapshotFile {
 
         return destination.lastPathComponent
     }
+}
+
+/// What the writer did, so the store can tell "saved" from "not saved, and here is why".
+///
+/// A refusal is deliberately not an error thrown from the writer: it carries what was found and where
+/// the unwritten document went, and the store has to reload before it reports anything.
+enum SnapshotWriteOutcome: Sendable {
+    case written
+    /// Dropped because a newer document has already been written. Its changes are in that newer
+    /// document, so there is nothing to report.
+    case supersededByNewerWrite
+    /// Not written, because the file on disk is no longer the one this document came from.
+    case refused(StoreFileChange)
 }
 
 /// The outcome of reading the store, so a caller can tell "no file yet" from "your file was moved

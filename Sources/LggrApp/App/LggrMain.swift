@@ -34,6 +34,11 @@ struct LggrMain: App {
         if let directory = SnapshotMode.requestedDirectory {
             SnapshotMode.run(writingTo: directory)
         }
+
+        // Also before any scene, and before `AppEnvironment.shared` is first touched — so a second
+        // launch neither opens a window nor loads the document the running instance owns. It brings
+        // the running instance to the front and exits.
+        SingleInstanceGuard.installOrExit()
     }
 
     var body: some Scene {

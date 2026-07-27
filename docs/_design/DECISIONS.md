@@ -143,3 +143,101 @@ once the bytes reach the buffer cache, not the device.
 **Why it matters here more than usual.** Lggr has no server copy. "We said it was saved" has to mean
 it survives a power loss, not just a clean quit. Saves happen a handful of times an hour — on start,
 pause and finish — so the cost of a full flush is irrelevant next to what it buys.
+
+---
+
+## D9. A file that changed underneath us is never overwritten
+
+**Decision.** `JSONFileStore` records the store file's **modification date and size** when it reads
+it, and re-checks both before every write. If they no longer match, the write is refused: the file on
+disk is left byte-for-byte as whatever changed it left it, the document that was not written is
+preserved beside it as `store-unwritten-<stamp>.json`, `externalChangeNotice` is set so the app can
+tell the user, the in-memory document is dropped and re-read, and the mutation throws.
+
+**Why it came up.** The store loaded once and treated its in-memory snapshot as authoritative
+forever, writing the whole thing back on every save. Any change made by anything else was silently
+erased by the next save. Two ordinary routes: two instances (the copy in `/Applications` plus a
+development build — the second starts empty and its first write erases the history), and restoring a
+backup while the app is open. Observed: a running instance overwrote a file that had been replaced
+underneath it and re-seeded the default classification rules on top, believing itself to be on a
+first launch.
+
+**Why date *and* size.** Two writes inside one timestamp tick leave the date identical, so size
+catches those; an edit that keeps the length leaves the size identical, so the date catches those.
+Either alone has a blind spot. The file is stat'd *before* its bytes are read, never after: if it
+changes between the two, the recorded identity then describes an older file than the bytes we hold
+and the next write is refused — the safe direction.
+
+**Why refuse rather than resolve.** Taking the disk copy discards records this instance already told
+the user were saved. Keeping memory is the defect. Merging is worse than both: with whole-document
+saves there is no way to distinguish "deleted over there" from "not there yet", so a union would
+resurrect rows the user deleted and a per-collection pick would silently choose one edit over
+another. Keeping *both* copies and writing neither is the only resolution that cannot destroy a
+record the user believes is saved. Failing the mutation is the same contract as D6.
+
+**The reload is generation-guarded.** Reloading re-arms the identity check, so a second save already
+in flight from the pre-reload document would have sailed through it. Every document carries a
+generation; a refusal raises the writer's floor above it, so everything descended from a refused
+document is refused too.
+
+**Enforced by** `StoreFileGuardTests` — `changeBetweenLoadAndWriteIsRefused`,
+`sameSecondDifferentSizeIsAChange`, `sameSizeLaterDateIsAChange`, `shorterReplacementIsRefused`,
+`deletedFileIsRefused`, `refusedDocumentIsPreserved`, `refusalReloadsFromDisk`,
+`saveAfterRefusalSucceeds`.
+
+---
+
+## D10. One dated backup per day, keeping seven, and an empty store never displaces a full one
+
+**Decision.** Before its first write, each launch copies the document it found into
+`LggrStoreLocation.baseDirectory()/backups` as `store-<yyyyMMdd>.json`, keeping seven. A backup of an
+empty document is refused while any backup with content exists, and rotation sheds empty backups
+before it touches one with content.
+
+**Why it came up.** Atomic writes make a *failed* write survivable and say nothing about one that
+succeeds and is wrong. Nothing in the app covered a bad write, a second instance, or a delete the
+user did not mean.
+
+**Why one per day and seven.** A copy per launch is the obvious design and the wrong one: a menu bar
+app is relaunched several times a day, so seven per-launch copies can cover an afternoon — and a bad
+write followed by two relaunches would rotate every good copy out within the hour. Seven daily copies
+cover a week, which is long enough that "my Tuesday sessions are gone", noticed on Friday, is still
+recoverable, and small enough to be seven files of a few kilobytes. The daily stamp also does the
+rotation: a second launch the same day finds the day's copy already there and leaves it, which is
+correct rather than a shortcut — that copy predates whatever went wrong today.
+
+**Why the empty-store rule.** The fault these backups exist for *produces an empty store*. If an
+empty document could take a slot, the first launch after the fault would rotate out the one copy that
+could have saved the user — the remedy destroyed by the fault it is the remedy for.
+
+**Enforced by** `StoreBackupsTests.emptyStoreDoesNotDisplaceContent`,
+`emptyStoreDoesNotDisplaceTheLastFullBackup`, `zeroLengthStoreDoesNotDisplaceContent`,
+`rotationPrefersToDeleteEmptyBackups`, `rotationKeepsTheMostRecent`,
+`launchBackupPrecedesTheFirstWrite`.
+
+---
+
+## D11. A second launch activates the running instance instead of opening a second window
+
+**Decision.** `SingleInstanceGuard` takes a `flock` on `instance.lock` in the store folder before any
+scene is built. If another process holds it, the running instance is brought to the front and this
+one exits. If the lock cannot be used at all, the app launches anyway.
+
+**Why a `flock` and not a pid file or a lock directory.** The lock lives on an open file descriptor,
+and the kernel closes every descriptor a process owns when it dies — clean quit, crash, `SIGKILL`,
+force-quit. **There is no such thing as a stale lock:** the file may be left behind, the lock on it
+is not, and the next launch acquires it immediately. Verified by hard-killing an instance and
+relaunching. A lock meaning "this file exists" or "this pid is written down" needs liveness checks
+and a recovery path, and locks the user out of their own app the first time one of them is wrong. The
+pid in the file is only a hint for finding the window to activate, verified through
+`NSRunningApplication` before it is used.
+
+**Why the store folder, not the bundle identifier.** The protected resource is the data folder. A
+development build and the shipped copy share a folder and a bundle identifier, so keying on the
+folder excludes them from each other — while `Scripts/smoke.sh`, whose `LGGR_STORE_DIR` points at a
+throwaway directory, gets its own lock and can run while the real Lggr is open.
+
+**Why a lock failure never blocks launch.** `EWOULDBLOCK` is the only answer that means "somebody
+else has it". Anything else means a filesystem that does not support locking, and reading that as
+another instance would refuse to launch Lggr for good. D9 is what guarantees the data survives; this
+guard only spares the user the situation.
