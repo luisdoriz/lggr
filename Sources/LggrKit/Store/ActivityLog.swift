@@ -403,16 +403,8 @@ public final class FileActivityLog: ActivityLog {
 
     public static func defaultDirectoryURL() throws -> URL {
         do {
-            let base = try FileManager.default.url(
-                for: .applicationSupportDirectory,
-                in: .userDomainMask,
-                appropriateFor: nil,
-                create: true
-            )
-            return
-                base
-                .appendingPathComponent("Lggr", isDirectory: true)
-                .appendingPathComponent("activity", isDirectory: true)
+            let base = try LggrStoreLocation.baseDirectory()
+            return base.appendingPathComponent("activity", isDirectory: true)
         } catch {
             throw StoreError.persistenceFailure(
                 "Could not locate the Application Support directory: \(error.localizedDescription)"

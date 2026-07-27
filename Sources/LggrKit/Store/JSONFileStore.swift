@@ -38,22 +38,8 @@ public final class JSONFileStore: LggrStore {
     }
 
     public static func defaultFileURL() throws -> URL {
-        do {
-            let base = try FileManager.default.url(
-                for: .applicationSupportDirectory,
-                in: .userDomainMask,
-                appropriateFor: nil,
-                create: true
-            )
-            return
-                base
-                .appendingPathComponent("Lggr", isDirectory: true)
-                .appendingPathComponent("store.json", isDirectory: false)
-        } catch {
-            throw StoreError.persistenceFailure(
-                "Could not locate the Application Support directory: \(error.localizedDescription)"
-            )
-        }
+        try LggrStoreLocation.baseDirectory()
+            .appendingPathComponent("store.json", isDirectory: false)
     }
 
     // MARK: - Projects
